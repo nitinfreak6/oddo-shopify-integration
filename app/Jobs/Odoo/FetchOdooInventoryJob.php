@@ -30,8 +30,23 @@ class FetchOdooInventoryJob implements ShouldQueue, ShouldBeUnique
         $state = SyncQueueState::forType('inventory');
 
         if ($state->is_running) {
-            Log::warning('FetchOdooInventoryJob: previous run still active, skipping.');
-            return;
+            // If a previous run crashed, we can end up "stuck" running forever.
+            // Treat old locks as stale so inventory sync can recover automatically.
+            $staleAfterMinutes = 15;
+            $startedAt = $state->run_started_at;
+
+            if ($startedAt && $startedAt->diffInMinutes(now()) >= $staleAfterMinutes) {
+                Log::warning('FetchOdooInventoryJob: stale running flag detected, resetting.', [
+                    'run_started_at' => $startedAt?->toDateTimeString(),
+                    'stale_after_min' => $staleAfterMinutes,
+                ]);
+                $state->update(['is_running' => false, 'run_started_at' => null]);
+            } else {
+                Log::warning('FetchOdooInventoryJob: previous run still active, skipping.', [
+                    'run_started_at' => $startedAt?->toDateTimeString(),
+                ]);
+                return;
+            }
         }
 
         $state->markRunning();

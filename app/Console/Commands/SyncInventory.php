@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Jobs\Odoo\FetchOdooInventoryJob;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 
 class SyncInventory extends Command
 {
@@ -36,6 +37,15 @@ class SyncInventory extends Command
         }
 
         FetchOdooInventoryJob::dispatchSync($locationId);
+
+        // Inventory fetch runs synchronously, but pushes are queued on "sync".
+        // Give immediate feedback so it doesn't look like "nothing happened".
+        try {
+            $queued = DB::table('jobs')->where('queue', 'sync')->count();
+            $this->line("Queued jobs on 'sync': {$queued}. Run `php artisan queue:work --queue=sync` to process.");
+        } catch (\Throwable $e) {
+            // Queue table may not exist in some environments; ignore.
+        }
 
         $this->info('Inventory sync job completed.');
 
