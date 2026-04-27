@@ -8,6 +8,7 @@
 <div class="grid grid-cols-3 gap-4 mb-4">
     @foreach([
         ['label' => 'Total SKUs',       'value' => $stats['total_skus'],   'color' => 'indigo'],
+        ['label' => 'Mapped SKUs',      'value' => $stats['mapped_skus'] ?? 0, 'color' => 'violet'],
         ['label' => 'Synced Today',     'value' => $stats['synced_today'], 'color' => 'green'],
         ['label' => 'Failed Today',     'value' => $stats['failed_today'], 'color' => 'red'],
     ] as $s)
@@ -76,7 +77,11 @@
                 @empty
                 <tr>
                     <td colspan="5" class="px-4 py-12 text-center text-gray-400">
-                        No variant mappings. Sync products first to populate inventory items.
+                        No variant mappings with Shopify inventory item IDs.
+                        <div class="text-xs text-gray-400 mt-2">
+                            Run <span class="font-mono bg-gray-100 px-1.5 py-0.5 rounded">php artisan sync:products --full</span>
+                            and ensure Shopify variant SKUs match Odoo <span class="font-mono">default_code</span>.
+                        </div>
                     </td>
                 </tr>
                 @endforelse

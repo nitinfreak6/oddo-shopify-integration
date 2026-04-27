@@ -16,11 +16,13 @@ class InventoryController extends Controller
         $channel = $request->input('channel', 'all');
         $status  = $request->input('status');
 
-        $entityTypes = match ($channel) {
-            'shopify' => ['inventory_item'],
-            'amazon'  => ['amazon_inventory'],
-            default   => ['inventory_item', 'amazon_inventory'],
-        };
+        if ($channel === 'shopify') {
+            $entityTypes = [SyncMapping::TYPE_INVENTORY_ITEM];
+        } elseif ($channel === 'amazon') {
+            $entityTypes = ['amazon_inventory'];
+        } else {
+            $entityTypes = [SyncMapping::TYPE_INVENTORY_ITEM, 'amazon_inventory'];
+        }
 
         // Get variant mappings (these hold inventory_item_id for Shopify)
         $variantQuery = SyncMapping::where('entity_type', 'product_variant')
@@ -38,7 +40,7 @@ class InventoryController extends Controller
         $variants = $variantQuery->paginate(50)->withQueryString();
 
         // Recent inventory sync logs
-        $logsQuery = SyncLog::whereIn('entity_type', ['inventory_item', 'amazon_inventory'])
+        $logsQuery = SyncLog::whereIn('entity_type', $entityTypes)
             ->orderByDesc('created_at');
 
         if ($status) {
@@ -49,18 +51,19 @@ class InventoryController extends Controller
 
         $syncState = [
             'inventory'        => SyncQueueState::forType('inventory'),
-            'amazon_inventory' => SyncQueueState::forType('amazon_orders'),
+            'amazon_inventory' => SyncQueueState::forType('amazon_inventory'),
         ];
 
         // Stats
         $stats = [
-            'synced_today'  => SyncLog::whereIn('entity_type', ['inventory_item', 'amazon_inventory'])
+            'synced_today'  => SyncLog::whereIn('entity_type', $entityTypes)
                                 ->where('status', 'success')
                                 ->whereDate('created_at', today())->count(),
-            'failed_today'  => SyncLog::whereIn('entity_type', ['inventory_item', 'amazon_inventory'])
+            'failed_today'  => SyncLog::whereIn('entity_type', $entityTypes)
                                 ->where('status', 'failed')
                                 ->whereDate('created_at', today())->count(),
             'total_skus'    => SyncMapping::where('entity_type', 'product_variant')->count(),
+            'mapped_skus'   => SyncMapping::where('entity_type', 'product_variant')->whereNotNull('shopify_secondary_id')->count(),
         ];
 
         return view('dashboard.inventory', compact('variants', 'search', 'channel', 'recentLogs', 'syncState', 'stats'));

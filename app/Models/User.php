@@ -45,18 +45,28 @@ class User extends Authenticatable
 
     public function hasPermission(string $permission): bool
 	{
-		return match ($permission) {
-			// Admin only
-			'manage-settings', 'manage-users', 'reveal-secrets' => $this->isAdmin(),
+        if (in_array($permission, ['manage-settings', 'manage-users', 'reveal-secrets'], true)) {
+            return $this->isAdmin();
+        }
 
-			// Manager + Admin
-			'sync-inventory', 'sync-products', 'view-logs' => $this->isManager(),
+        if (in_array($permission, [
+            'trigger-sync',
+            'view-products',
+            'view-orders',
+            'view-inventory',
+            'view-logs',
+            'view-webhooks',
+            'sync-inventory',
+            'sync-products',
+        ], true)) {
+            return $this->isManager();
+        }
 
-			// Everyone
-			'view-dashboard' => $this->isViewer(),
+        if ($permission === 'view-dashboard') {
+            return $this->isViewer();
+        }
 
-			default => false,
-		};
+        return false;
 	}
 
     public function roleBadgeColor(): string

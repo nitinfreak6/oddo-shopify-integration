@@ -2,6 +2,7 @@
 
 namespace App\Services\Sync;
 
+use App\Exceptions\ShopifyApiException;
 use App\Models\SyncLog;
 use App\Models\SyncMapping;
 use App\Services\MappingService;
@@ -11,11 +12,19 @@ use Illuminate\Support\Facades\Log;
 
 class ProductSyncService
 {
+    private OdooProductService $odooProducts;
+    private ShopifyProductService $shopifyProducts;
+    private MappingService $mappings;
+
     public function __construct(
-        private readonly OdooProductService  $odooProducts,
-        private readonly ShopifyProductService $shopifyProducts,
-        private readonly MappingService $mappings,
-    ) {}
+        OdooProductService $odooProducts,
+        ShopifyProductService $shopifyProducts,
+        MappingService $mappings
+    ) {
+        $this->odooProducts = $odooProducts;
+        $this->shopifyProducts = $shopifyProducts;
+        $this->mappings = $mappings;
+    }
 
     /**
      * Sync a single Odoo product template to Shopify.
@@ -53,8 +62,22 @@ class ProductSyncService
 
         try {
             if ($mapping) {
-                $shopifyProduct = $this->shopifyProducts->update($mapping->shopify_id, $payload);
-                $action = 'update';
+                try {
+                    $shopifyProduct = $this->shopifyProducts->update($mapping->shopify_id, $payload);
+                    $action = 'update';
+                } catch (ShopifyApiException $e) {
+                    // Self-heal stale mappings (e.g. product deleted in Shopify).
+                    if ($e->getHttpStatus() === 404) {
+                        Log::warning('Shopify product not found for mapped ID; creating new product.', [
+                            'odoo_id' => $odooId,
+                            'shopify_id' => $mapping->shopify_id,
+                        ]);
+                        $shopifyProduct = $this->shopifyProducts->create($payload);
+                        $action = 'create';
+                    } else {
+                        throw $e;
+                    }
+                }
             } else {
                 $shopifyProduct = $this->shopifyProducts->create($payload);
                 $action = 'create';
@@ -87,22 +110,32 @@ class ProductSyncService
      */
     private function syncVariantMappings(array $odooVariants, array $shopifyVariants): void
     {
-        // Index Shopify variants by SKU
+        // Index Shopify variants by SKU and barcode
         $shopifyBySku = [];
+        $shopifyByBarcode = [];
         foreach ($shopifyVariants as $sv) {
             if (!empty($sv['sku'])) {
                 $shopifyBySku[$sv['sku']] = $sv;
+            }
+            if (!empty($sv['barcode'])) {
+                $shopifyByBarcode[$sv['barcode']] = $sv;
             }
         }
 
         foreach ($odooVariants as $odooVariant) {
             $sku = $odooVariant['default_code'] ?? '';
+            $barcode = $odooVariant['barcode'] ?? '';
 
-            if (!$sku || !isset($shopifyBySku[$sku])) {
+            if ($sku && isset($shopifyBySku[$sku])) {
+                $sv = $shopifyBySku[$sku];
+            } elseif ($barcode && isset($shopifyByBarcode[$barcode])) {
+                $sv = $shopifyByBarcode[$barcode];
+            } elseif (count($odooVariants) === 1 && count($shopifyVariants) === 1) {
+                // Safe fallback: single-variant products with missing SKU/barcode.
+                $sv = $shopifyVariants[0];
+            } else {
                 continue;
             }
-
-            $sv = $shopifyBySku[$sku];
 
             $this->mappings->upsert(
                 SyncMapping::TYPE_PRODUCT_VARIANT,
@@ -110,7 +143,7 @@ class ProductSyncService
                 (string) $sv['id'],
                 [
                     'shopify_secondary_id' => (string) ($sv['inventory_item_id'] ?? ''),
-                    'odoo_reference'       => $sku,
+                    'odoo_reference'       => $sku ?: ($barcode ?: null),
                     'last_synced_at'       => now(),
                 ]
             );
