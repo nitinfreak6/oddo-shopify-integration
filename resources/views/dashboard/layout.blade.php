@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-50">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>@yield('title', 'Dashboard') — Connector</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        .nav-link { @apply flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition-colors; }
+        .nav-link.active { @apply bg-indigo-700 text-white font-medium; }
+        .nav-link:not(.active) { @apply text-indigo-100 hover:bg-indigo-700/60; }
+        .badge { @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium; }
+    </style>
+</head>
+<body class="h-full" x-data="{ sidebarOpen: false }">
+
+<div class="flex h-screen overflow-hidden">
+
+    {{-- ── Sidebar ── --}}
+    <aside class="flex flex-col w-64 bg-indigo-900 shrink-0">
+        {{-- Brand --}}
+        <div class="flex items-center gap-3 px-5 py-5 border-b border-indigo-700/50">
+            <div class="w-8 h-8 bg-indigo-500 rounded-lg flex items-center justify-center shrink-0">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+            </div>
+            <div class="overflow-hidden">
+                <div class="text-white font-semibold text-sm leading-tight truncate">Connector</div>
+                <div class="text-indigo-300 text-xs truncate">Odoo · Shopify · Amazon</div>
+            </div>
+        </div>
+
+        {{-- Navigation --}}
+        <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+
+            {{-- Overview --}}
+            <a href="{{ route('dashboard') }}"
+               class="nav-link {{ request()->routeIs('dashboard') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+                </svg>
+                Overview
+            </a>
+
+            {{-- Sync section --}}
+            <div class="pt-3 pb-1">
+                <p class="px-3 text-xs font-semibold text-indigo-400 uppercase tracking-wider">Sync</p>
+            </div>
+
+            @if(auth()->user()->can('view-products'))
+            <a href="{{ route('dashboard.products') }}"
+               class="nav-link {{ request()->routeIs('dashboard.products') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
+                </svg>
+                Products
+            </a>
+            @endif
+
+            @if(auth()->user()->can('view-orders'))
+            <a href="{{ route('dashboard.orders') }}"
+               class="nav-link {{ request()->routeIs('dashboard.orders') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                </svg>
+                Orders
+            </a>
+            @endif
+
+            @if(auth()->user()->can('view-inventory'))
+            <a href="{{ route('dashboard.inventory') }}"
+               class="nav-link {{ request()->routeIs('dashboard.inventory') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582 4 8 4m8-4c0-2.21-3.582 4-8 4"/>
+                </svg>
+                Inventory
+            </a>
+            @endif
+
+            {{-- Logs section --}}
+            <div class="pt-3 pb-1">
+                <p class="px-3 text-xs font-semibold text-indigo-400 uppercase tracking-wider">Logs & Events</p>
+            </div>
+
+            @if(auth()->user()->can('view-logs'))
+            <a href="{{ route('dashboard.logs') }}"
+               class="nav-link {{ request()->routeIs('dashboard.logs*') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                </svg>
+                Sync Logs
+            </a>
+            @endif
+
+            @if(auth()->user()->can('view-webhooks'))
+            <a href="{{ route('dashboard.webhooks') }}"
+               class="nav-link {{ request()->routeIs('dashboard.webhooks') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+                </svg>
+                Webhooks
+            </a>
+            @endif
+
+            {{-- Admin section --}}
+            @if(auth()->user()->isAdmin())
+            <div class="pt-3 pb-1">
+                <p class="px-3 text-xs font-semibold text-indigo-400 uppercase tracking-wider">Admin</p>
+            </div>
+
+            <a href="{{ route('dashboard.settings') }}"
+               class="nav-link {{ request()->routeIs('dashboard.settings*') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                API Settings
+            </a>
+
+            <a href="{{ route('dashboard.users.index') }}"
+               class="nav-link {{ request()->routeIs('dashboard.users*') ? 'active' : '' }}">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/>
+                </svg>
+                Users
+            </a>
+            @endif
+        </nav>
+
+        {{-- User footer --}}
+        <div class="border-t border-indigo-700/50 px-4 py-3">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-indigo-600 rounded-full flex items-center justify-center text-white text-sm font-bold shrink-0">
+                    {{ strtoupper(substr(auth()->user()->name, 0, 1)) }}
+                </div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-white text-sm font-medium truncate">{{ auth()->user()->name }}</div>
+                    <div class="text-indigo-300 text-xs truncate">{{ auth()->user()->role }}</div>
+                </div>
+                <form method="POST" action="{{ route('logout') }}">
+                    @csrf
+                    <button type="submit" title="Logout"
+                            class="text-indigo-300 hover:text-white transition">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                        </svg>
+                    </button>
+                </form>
+            </div>
+        </div>
+    </aside>
+
+    {{-- ── Main content ── --}}
+    <div class="flex-1 flex flex-col overflow-hidden">
+
+        {{-- Top bar --}}
+        <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shrink-0">
+            <h1 class="text-lg font-semibold text-gray-800">@yield('page-title', 'Dashboard')</h1>
+            <div class="flex items-center gap-3">
+                {{-- Flash success/error --}}
+                @if(session('success'))
+                    <span class="text-sm text-green-600 bg-green-50 border border-green-200 px-3 py-1 rounded-full">
+                        ✓ {{ session('success') }}
+                    </span>
+                @endif
+                @if(session('error'))
+                    <span class="text-sm text-red-600 bg-red-50 border border-red-200 px-3 py-1 rounded-full">
+                        ✗ {{ session('error') }}
+                    </span>
+                @endif
+
+                {{-- Manual sync trigger (manager+) --}}
+                @if(auth()->user()->can('trigger-sync'))
+                <div x-data="{ open: false }" class="relative">
+                    <button @click="open = !open"
+                            class="inline-flex items-center gap-1.5 text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg transition">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Sync Now
+                    </button>
+                    <div x-show="open" x-cloak @click.outside="open = false"
+                         class="absolute right-0 top-10 w-52 bg-white border border-gray-200 rounded-xl shadow-lg z-50 py-1">
+                        @foreach([
+                            'products' => 'Shopify Products',
+                            'inventory' => 'Shopify Inventory',
+                            'orders' => 'Shopify Orders',
+                            'customers' => 'Customers',
+                            'amazon_products' => 'Amazon Products',
+                            'amazon_orders' => 'Amazon Orders',
+                            'amazon_inventory' => 'Amazon Inventory',
+                        ] as $type => $label)
+                        <form method="POST" action="{{ route('dashboard.sync.trigger') }}">
+                            @csrf
+                            <input type="hidden" name="type" value="{{ $type }}">
+                            <button type="submit"
+                                    class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50 hover:text-indigo-700">
+                                {{ $label }}
+                            </button>
+                        </form>
+                        @endforeach
+                    </div>
+                </div>
+                @endif
+            </div>
+        </header>
+
+        {{-- Page content --}}
+        <main class="flex-1 overflow-y-auto p-6">
+            @yield('content')
+        </main>
+    </div>
+</div>
+
+@stack('scripts')
+</body>
+</html>

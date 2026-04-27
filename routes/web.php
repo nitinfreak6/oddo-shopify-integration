@@ -1,0 +1,73 @@
+<?php
+
+use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\Dashboard\InventoryController;
+use App\Http\Controllers\Dashboard\OrdersController;
+use App\Http\Controllers\Dashboard\OverviewController;
+use App\Http\Controllers\Dashboard\ProductsController;
+use App\Http\Controllers\Dashboard\SettingsController;
+use App\Http\Controllers\Dashboard\SyncLogsController;
+use App\Http\Controllers\Dashboard\UsersController;
+use App\Http\Controllers\Dashboard\WebhooksController;
+use Illuminate\Support\Facades\Route;
+
+/*
+|--------------------------------------------------------------------------
+| Auth
+|--------------------------------------------------------------------------
+*/
+Route::get('/', fn () => redirect()->route('login'));
+
+Route::middleware('guest')->group(function () {
+    Route::get('/login',  [LoginController::class, 'showLogin'])->name('login');
+    Route::post('/login', [LoginController::class, 'login']);
+});
+
+Route::post('/logout', [LoginController::class, 'logout'])->name('logout')->middleware('auth');
+
+/*
+|--------------------------------------------------------------------------
+| Dashboard (auth required)
+|--------------------------------------------------------------------------
+*/
+Route::middleware(['auth'])->prefix('dashboard')->name('dashboard')->group(function () {
+
+    // Overview
+    Route::get('/', [OverviewController::class, 'index'])->name('');
+
+    // Sync data views (viewer+)
+    Route::get('/products',  [ProductsController::class, 'index'])->name('.products');
+    Route::get('/orders',    [OrdersController::class, 'index'])->name('.orders');
+    Route::get('/inventory', [InventoryController::class, 'index'])->name('.inventory');
+
+    // Logs (viewer+)
+    Route::get('/logs',        [SyncLogsController::class, 'index'])->name('.logs');
+    Route::get('/logs/{log}',  [SyncLogsController::class, 'show'])->name('.logs.show');
+
+    // Webhooks (manager+)
+    Route::get('/webhooks', [WebhooksController::class, 'index'])
+        ->middleware('role:view-webhooks')
+        ->name('.webhooks');
+
+    // Sync trigger (manager+)
+    Route::post('/sync/trigger', [SettingsController::class, 'triggerSync'])
+        ->middleware('role:trigger-sync')
+        ->name('.sync.trigger');
+
+    // Settings (admin only)
+    Route::middleware('role:manage-settings')->group(function () {
+        Route::get('/settings',          [SettingsController::class, 'index'])->name('.settings');
+        Route::put('/settings',          [SettingsController::class, 'update'])->name('.settings.update');
+        Route::get('/settings/{setting}/reveal', [SettingsController::class, 'reveal'])->name('.settings.reveal');
+    });
+
+    // User management (admin only)
+    Route::middleware('role:manage-users')->prefix('users')->name('.users')->group(function () {
+        Route::get('/',           [UsersController::class, 'index'])->name('.index');
+        Route::get('/create',     [UsersController::class, 'create'])->name('.create');
+        Route::post('/',          [UsersController::class, 'store'])->name('.store');
+        Route::get('/{user}',     [UsersController::class, 'edit'])->name('.edit');
+        Route::put('/{user}',     [UsersController::class, 'update'])->name('.update');
+        Route::delete('/{user}',  [UsersController::class, 'destroy'])->name('.destroy');
+    });
+});
