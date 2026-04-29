@@ -32,6 +32,24 @@ class InventorySyncService
         );
 
         if (!$variantMapping || !$variantMapping->shopify_secondary_id) {
+            $log = SyncLog::create([
+                'direction'       => SyncLog::DIRECTION_ODOO_TO_SHOPIFY,
+                'entity_type'     => SyncMapping::TYPE_INVENTORY_ITEM,
+                'entity_id'       => (string) $odooProductId,
+                'action'          => 'update',
+                'status'          => SyncLog::STATUS_SKIPPED,
+                'request_payload' => json_encode([
+                    'odoo_product_id' => $odooProductId,
+                    'odoo_location_id' => $odooLocationId,
+                    'reason'           => 'missing_variant_mapping',
+                ]),
+            ]);
+
+            $log->markSkipped('No variant mapping for this Odoo product variant.', [
+                'odoo_product_id'  => (string) $odooProductId,
+                'odoo_location_id' => (string) $odooLocationId,
+            ]);
+
             Log::debug("No variant mapping for Odoo product #{$odooProductId}, skipping inventory sync");
             return false;
         }
@@ -41,6 +59,27 @@ class InventorySyncService
         $shopifyLocationId = $locationMap[(string) $odooLocationId] ?? null;
 
         if (!$shopifyLocationId) {
+            $log = SyncLog::create([
+                'direction'       => SyncLog::DIRECTION_ODOO_TO_SHOPIFY,
+                'entity_type'     => SyncMapping::TYPE_INVENTORY_ITEM,
+                'entity_id'       => (string) $odooProductId,
+                'action'          => 'update',
+                'status'          => SyncLog::STATUS_SKIPPED,
+                'request_payload' => json_encode([
+                    'odoo_product_id' => $odooProductId,
+                    'odoo_location_id' => $odooLocationId,
+                    'shopify_location_id' => null,
+                    'reason' => 'missing_shopify_location_map',
+                    'location_map_keys' => array_keys($locationMap),
+                ]),
+            ]);
+
+            $log->markSkipped('No Shopify location mapped for this Odoo internal location.', [
+                'odoo_product_id' => (string) $odooProductId,
+                'odoo_location_id' => (string) $odooLocationId,
+                'location_map_keys' => array_keys($locationMap),
+            ]);
+
             Log::debug("No Shopify location mapped for Odoo location #{$odooLocationId}");
             return false;
         }
@@ -56,6 +95,7 @@ class InventorySyncService
             'request_payload' => json_encode([
                 'inventory_item_id' => $variantMapping->shopify_secondary_id,
                 'location_id'       => $shopifyLocationId,
+                'odoo_location_id'  => (string) $odooLocationId,
                 'available'         => $available,
             ]),
         ]);

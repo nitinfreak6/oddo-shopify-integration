@@ -40,9 +40,9 @@ class ProductsController extends Controller
             ->pluck('odoo_id')->toArray();
 
         $variantCounts = SyncMapping::where('entity_type', 'product_variant')
-            ->selectRaw('COUNT(*) as count, MIN(odoo_id) as sample_odoo')
-            ->groupBy('shopify_id')
-            ->pluck('count', 'shopify_id');
+		->selectRaw('COUNT(*) as count, MIN(odoo_id) as sample_odoo, shopify_id')
+		->groupBy('shopify_id')
+		->pluck('count', 'shopify_id');
 
         // Recent product sync logs
         $recentLogs = SyncLog::whereIn('entity_type', ['product', 'amazon_product', 'amazon_variant'])

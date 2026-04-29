@@ -13,6 +13,12 @@ class OdooProductService
 		'standard_price',
 		'weight',
 		'categ_id',
+		// Shopify payload fields (used in ShopifyProductService::buildPayload)
+		'website_published',
+		'description_sale',
+		'website_meta_keywords',
+		'image_1920',
+		'attribute_line_ids',
 		'qty_available',
 		'virtual_available',
 		'sale_ok',

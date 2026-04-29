@@ -53,4 +53,13 @@ class SyncLog extends Model
             'attempts'      => $this->attempts + 1,
         ]);
     }
+
+    public function markSkipped(string $reason, array $context = []): void
+    {
+        $this->update([
+            'status'        => self::STATUS_SKIPPED,
+            'error_message' => $reason,
+            'error_context' => $context,
+        ]);
+    }
 }

@@ -47,7 +47,10 @@ class ShopifyProductService
      */
     public function buildPayload(array $odooTemplate, array $variants, array $attributeValues): array
     {
-        $status = (!empty($odooTemplate['website_published'])) ? 'active' : 'draft';
+        $isPublished = !empty($odooTemplate['website_published']) 
+            || !empty($odooTemplate['is_published']);
+
+$status = $isPublished ? 'active' : 'draft';
 
         $shopifyVariants = array_map(function (array $variant) use ($attributeValues) {
             return $this->buildVariantPayload($variant, $attributeValues);
