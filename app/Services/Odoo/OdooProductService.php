@@ -66,6 +66,53 @@ class OdooProductService
             ['order' => 'id asc', 'offset' => $offset, 'limit' => $limit]
         );
     }
+	
+	/**
+ * Get attribute values for a product template as a key=>value map.
+ * Returns e.g. ['color' => 'White', 'material' => 'Leather', 'gender' => 'Unisex']
+ */
+public function getProductAttributes(int $templateId): array
+{
+    $lines = $this->odoo->searchRead(
+        'product.template.attribute.line',
+        [['product_tmpl_id', '=', $templateId]],
+        ['attribute_id', 'value_ids']
+    );
+
+    if (empty($lines)) {
+        return [];
+    }
+
+    $allValueIds = array_merge(...array_column($lines, 'value_ids'));
+
+    if (empty($allValueIds)) {
+        return [];
+    }
+
+    $values = $this->odoo->read(
+        'product.attribute.value',
+        $allValueIds,
+        ['id', 'name', 'attribute_id']
+    );
+
+    // Index values by id
+    $valuesById = [];
+    foreach ($values as $v) {
+        $valuesById[$v['id']] = $v['name'];
+    }
+
+    // Build attribute name => value map
+    $result = [];
+    foreach ($lines as $line) {
+        $attrName = strtolower($line['attribute_id'][1]);
+        $firstValueId = $line['value_ids'][0] ?? null;
+        if ($firstValueId && isset($valuesById[$firstValueId])) {
+            $result[$attrName] = $valuesById[$firstValueId];
+        }
+    }
+
+    return $result;
+}
 
     /**
      * Get variants for a list of template IDs.

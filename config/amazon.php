@@ -51,4 +51,17 @@ return [
      * Request timeout in seconds.
      */
     'timeout' => (int) env('AMAZON_TIMEOUT', 30),
+    'product_type'                 => env('AMAZON_PRODUCT_TYPE', 'SPORTING_GOODS'),
+    'manufacturer'                 => env('AMAZON_MANUFACTURER', ''),
+    'country_of_origin'            => env('AMAZON_COUNTRY_OF_ORIGIN', ''),
+    'item_weight_unit'             => env('AMAZON_ITEM_WEIGHT_UNIT', 'kilograms'),
+    'default_item_weight'          => (float) env('AMAZON_DEFAULT_ITEM_WEIGHT', 0.5),
+    'item_type_name'               => env('AMAZON_ITEM_TYPE_NAME', ''),
+    'department'                   => env('AMAZON_DEPARTMENT', ''),
+    'material'                     => env('AMAZON_MATERIAL', ''),
+    'color'                        => env('AMAZON_COLOR', ''),
+    'merchant_suggested_asin'      => env('AMAZON_MERCHANT_SUGGESTED_ASIN', ''),
+    'external_product_information' => env('AMAZON_EXTERNAL_PRODUCT_INFORMATION', ''),
+    'packer_contact_information'   => env('AMAZON_PACKER_CONTACT_INFORMATION', ''),
+    'importer_contact_information' => env('AMAZON_IMPORTER_CONTACT_INFORMATION', ''),
 ];

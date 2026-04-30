@@ -60,7 +60,7 @@ class AmazonInventoryService
                     'x-amz-date'         => gmdate('Ymd\THis\Z'),
                     'Content-Type'       => 'application/json',
                 ],
-                'query' => ['marketplaceIds' => $marketplaceId],
+                'query' => ['marketplaceIds' => [$marketplaceId]],
                 'json'  => $body,
             ]);
 
@@ -91,7 +91,7 @@ class AmazonInventoryService
         $params = [
             'granularityType' => 'Marketplace',
             'granularityId'   => $this->amazon->getMarketplaceId(),
-            'marketplaceIds'  => $this->amazon->getMarketplaceId(),
+            'marketplaceIds'  => [$this->amazon->getMarketplaceId()],
         ];
 
         if ($skus) {

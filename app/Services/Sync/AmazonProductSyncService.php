@@ -60,7 +60,8 @@ class AmazonProductSyncService
             ]);
 
             try {
-                $attributes = $this->amazonListings->buildListingAttributes($odooTemplate, $variant);
+                $productAttributes = $this->odooProducts->getProductAttributes((int) $odooTemplate['id']);
+				$attributes = $this->amazonListings->buildListingAttributes($odooTemplate, $variant, $productAttributes);
 
                 $result = $this->amazonListings->putListing($sku, $attributes);
 
