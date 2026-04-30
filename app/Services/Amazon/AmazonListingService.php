@@ -221,21 +221,29 @@ class AmazonListingService
 					'marketplace_id'           => $marketplaceId,
 				],
 			],
-			
-			// --- Price ---
-			$price = (float) ($odooVariant['lst_price'] ?? 0);
-			if ($price > 0) {
-				$attributes['purchasable_offer'] = [[
-					'currency'       => 'INR',
-					'our_price'      => [[
-						'schedule' => [[
-							'value_with_tax' => $price,
-						]],
+        ];
+
+		// --- Price via purchasable_offer (India requires our_price + maximum_retail_price) ---
+		$price    = (float) ($odooVariant['lst_price'] ?? 0);
+		$costPrice = (float) ($odooVariant['standard_price'] ?? $price);
+		// MRP must be >= our_price; use list price as MRP and cost+margin as our_price
+		$mrp      = $price; // MRP = list price (printed on package)
+		if ($price > 0) {
+			$attributes['purchasable_offer'] = [[
+				'currency'              => 'INR',
+				'marketplace_id'        => $marketplaceId,
+				'our_price'             => [[
+					'schedule' => [[
+						'value_with_tax' => $price,
 					]],
-					'marketplace_id' => $marketplaceId,
-				]];
-			}
-		];
+				]],
+				'maximum_retail_price'  => [[
+					'schedule' => [[
+						'value_with_tax' => $mrp,
+					]],
+				]],
+			]];
+		}
 
         // --- Weight from Odoo product ---
 		// Odoo stores weight in grams, Amazon needs kilograms

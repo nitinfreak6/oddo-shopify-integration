@@ -24,12 +24,13 @@ class AmazonOrderService
             $params = $nextToken
                 ? ['NextToken' => $nextToken]
                 : [
-                    'MarketplaceIds'  => $marketplaceId,
+                    'MarketplaceIds'   => $marketplaceId,
                     'LastUpdatedAfter' => $isoDatetime,
-                    'OrderStatuses'   => implode(',', ['Unshipped', 'PartiallyShipped', 'Shipped', 'Canceled']),
+                    'OrderStatuses'    => implode(',', ['Unshipped', 'PartiallyShipped', 'Shipped', 'Canceled']),
                 ];
 
-            $response  = $this->amazon->get("/orders/{$this->ORDERS_VERSION}/orders", $params);
+            $rdt        = $this->getRestrictedToken();
+            $response   = $this->amazon->getWithToken($rdt, "/orders/" . self::ORDERS_VERSION . "/orders", $params);
             $pageOrders = $response['payload']['Orders'] ?? [];
             $nextToken  = $response['payload']['NextToken'] ?? null;
 
@@ -51,7 +52,8 @@ class AmazonOrderService
      */
     public function getOrderItems(string $amazonOrderId): array
     {
-        $response = $this->amazon->get("/orders/{$this->ORDERS_VERSION}/orders/{$amazonOrderId}/orderItems");
+        $rdt      = $this->getRestrictedToken();
+        $response = $this->amazon->getWithToken($rdt, "/orders/" . self::ORDERS_VERSION . "/orders/{$amazonOrderId}/orderItems");
 
         return $response['payload']['OrderItems'] ?? [];
     }
@@ -62,7 +64,8 @@ class AmazonOrderService
     public function getOrder(string $amazonOrderId): ?array
     {
         try {
-            $response = $this->amazon->get("/orders/{$this->ORDERS_VERSION}/orders/{$amazonOrderId}");
+            $rdt      = $this->getRestrictedToken();
+            $response = $this->amazon->getWithToken($rdt, "/orders/" . self::ORDERS_VERSION . "/orders/{$amazonOrderId}");
 
             return $response['payload'] ?? null;
         } catch (\Throwable) {
@@ -77,7 +80,7 @@ class AmazonOrderService
     public function confirmShipment(string $amazonOrderId, array $shipmentData): array
     {
         return $this->amazon->post(
-            "/orders/{$this->ORDERS_VERSION}/orders/{$amazonOrderId}/shipmentConfirmation",
+            "/orders/" . self::ORDERS_VERSION . "/orders/{$amazonOrderId}/shipmentConfirmation",
             $shipmentData
         );
     }
@@ -90,9 +93,19 @@ class AmazonOrderService
         $address = $amazonOrder['ShippingAddress'] ?? [];
 
         return [
-            'amazon_order'   => $amazonOrder,
-            'amazon_items'   => $orderItems,
+            'amazon_order'     => $amazonOrder,
+            'amazon_items'     => $orderItems,
             'shipping_address' => $address,
         ];
     }
+
+    /**
+     * Get a Restricted Data Token for Orders API.
+     * Cached for 55 minutes (tokens expire in 60).
+     */
+	   private function getRestrictedToken(): string
+	{
+		// Use regular access token — RDT only needed for PII data
+		return $this->amazon->getAccessToken();
+	}
 }

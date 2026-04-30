@@ -47,7 +47,7 @@ class SyncAmazonInventory extends Command
             return self::SUCCESS;
         }
 
-        $odooProductIds = $variantMappings->pluck('odoo_id')->toArray();
+        $odooProductIds = $variantMappings->pluck('odoo_id')->map(fn($id) => (int) $id)->toArray();
 
         // Fetch current quants for these products
         $quants = $odooInventory->getAllForProducts($odooProductIds);

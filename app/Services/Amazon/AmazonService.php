@@ -128,10 +128,14 @@ class AmazonService
         return (string) $response->getBody();
     }
 
-    private function request(string $method, string $path, array $options = []): array
+   public function getWithToken(string $token, string $path, array $query = []): array
     {
-        $token = $this->getAccessToken();
+        return $this->request('GET', $path, ['query' => $query], $token);
+    }
 
+    private function request(string $method, string $path, array $options = [], ?string $overrideToken = null): array
+    {
+        $token = $overrideToken ?? $this->getAccessToken();
         $options['headers'] = array_merge($options['headers'] ?? [], [
             'x-amz-access-token' => $token,
             'x-amz-date'         => gmdate('Ymd\THis\Z'),

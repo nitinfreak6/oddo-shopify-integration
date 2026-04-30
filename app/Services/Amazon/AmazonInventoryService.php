@@ -27,7 +27,7 @@ class AmazonInventoryService
         $sellerId      = $this->amazon->getSellerId();
         $marketplaceId = $this->amazon->getMarketplaceId();
 
-        $path = "/listings/{$this->LISTINGS_VERSION}/items/{$sellerId}/" . rawurlencode($sku);
+        $path = "/listings/" . self::LISTINGS_VERSION . "/items/{$sellerId}/" . rawurlencode($sku);
 
         $body = [
             'productType' => 'PRODUCT',
@@ -60,7 +60,7 @@ class AmazonInventoryService
                     'x-amz-date'         => gmdate('Ymd\THis\Z'),
                     'Content-Type'       => 'application/json',
                 ],
-                'query' => ['marketplaceIds' => [$marketplaceId]],
+                'query' => ['marketplaceIds' => $marketplaceId],
                 'json'  => $body,
             ]);
 
