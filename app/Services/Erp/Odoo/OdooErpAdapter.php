@@ -36,6 +36,11 @@ class OdooErpAdapter implements ErpInterface
     {
         return $this->products->getAllActive($offset, $limit);
     }
+	
+	public function getProductByIdFull(int $erpId): ?array
+	{
+		return $this->products->getByIdFull($erpId);
+	}
 
     public function getProductById(int $erpId): ?array
     {
@@ -46,6 +51,11 @@ class OdooErpAdapter implements ErpInterface
     {
         return $this->products->getVariantsForTemplates($productIds);
     }
+	
+	public function getVendorsForTemplate(int $templateId): array
+	{
+		return $this->products->getVendorsForTemplate($templateId);
+	}
 
     public function getAttributeValues(array $valueIds): array
     {
@@ -66,29 +76,30 @@ class OdooErpAdapter implements ErpInterface
     public function upsertProduct(array $productData): int|string
     {
         // Strip internal tracking fields that don't exist in Odoo
-        $internalFields = ['_source', '_ecom_id', '_variants_raw', '_shopify_product_type'];
+        $internalFields = ['_source', '_ecom_id', '_variants_raw', '_shopify_product_type','_primary_vendor'];
         foreach ($internalFields as $field) {
             unset($productData[$field]);
         }
-        
+
         // Get the underlying OdooService from OdooProductService
         $odooService = app(\App\Services\Odoo\OdooService::class);
-        
+
         // If ID is provided, update existing product
         if (!empty($productData['id'])) {
             $productId = (int) $productData['id'];
-            unset($productData['id']); // Remove ID from data payload
-            
+
+            // Map ecom (Shopify) fields → Odoo fields. Writing raw Shopify keys
+            // like 'title' to product.template throws "Invalid field 'title'".
+            $vals = $this->mapEcomToOdooProduct($productData);
+
             // Use Odoo's write method to update product.template
-            $odooService->write('product.template', [$productId], $productData);
-            
+            $odooService->write('product.template', [$productId], $vals);
+
             return $productId;
         }
-        
+
         // Otherwise create new product using product.template
-        $productId = $odooService->create('product.template', $productData);
-        
-        return $productId;
+        return $this->createProduct($productData);
     }
 
     // ── Inventory ────────────────────────────────────────────────────────
@@ -349,20 +360,21 @@ class OdooErpAdapter implements ErpInterface
      * Create a product.template in Odoo from ecom product data.
      * Maps Shopify normalized product fields → Odoo product.template.
      */
-    public function createProduct(array $data): int
+    /**
+     * Map a raw ecom (Shopify) product into product.template content fields.
+     *
+     * Shared by createProduct() and upsertProduct() so the create and update
+     * paths use identical field translation. Returns ONLY mapped Odoo fields —
+     * raw Shopify keys like 'title', 'body_html', 'handle', 'variants' never
+     * reach Odoo's write()/create() (which reject unknown fields with
+     * "Invalid field 'title' in 'product.template'").
+     */
+    private function mapEcomToOdooProduct(array $data): array
     {
-        $odoo = app(\App\Services\Odoo\OdooService::class);
-
-        // Build minimal product.template payload from Shopify data
         $payload = [
-            'name'          => $data['name'] ?? $data['title'] ?? ('Shopify Product #' . ($data['id'] ?? '')),
-            'sale_ok'       => true,
-            'purchase_ok'   => true,
-            'active'        => true,
-            'type'          => 'consu',   // consumable — change to 'product' if tracked inventory needed
+            'name' => $data['name'] ?? $data['title'] ?? ('Shopify Product #' . ($data['id'] ?? '')),
         ];
 
-        // Map optional fields
         if (!empty($data['description'] ?? $data['body_html'] ?? null)) {
             $payload['description_sale'] = strip_tags($data['description'] ?? $data['body_html']);
         }
@@ -371,15 +383,28 @@ class OdooErpAdapter implements ErpInterface
             $payload['description_picking'] = $data['vendor'];
         }
 
-        // Set list price from first variant price if available
         if (!empty($data['variants'][0]['price'])) {
             $payload['list_price'] = (float) $data['variants'][0]['price'];
         }
 
-        // Set internal reference from first variant SKU
         if (!empty($data['variants'][0]['sku'])) {
             $payload['default_code'] = $data['variants'][0]['sku'];
         }
+
+        return $payload;
+    }
+
+    public function createProduct(array $data): int
+    {
+        $odoo = app(\App\Services\Odoo\OdooService::class);
+
+        // Content fields (name/price/sku/...) + create-only defaults.
+        $payload = array_merge($this->mapEcomToOdooProduct($data), [
+            'sale_ok'     => true,
+            'purchase_ok' => true,
+            'active'      => true,
+            'type'        => 'consu',   // consumable — change to 'product' if tracked inventory needed
+        ]);
 
         $productId = $odoo->create('product.template', $payload);
 
@@ -554,6 +579,15 @@ class OdooErpAdapter implements ErpInterface
                     ];
                 }
             }
+			
+			if ($entityType === 'product') {
+				$fields[] = [
+					'key'   => '_primary_vendor',
+					'label' => 'Primary Vendor (computed)',
+					'type'  => 'char',
+					'scope' => 'header',
+				];
+			}
 
             usort($fields, fn($a, $b) => strcmp($a['label'], $b['label']));
         } catch (\Throwable $e) {

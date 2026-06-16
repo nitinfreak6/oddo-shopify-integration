@@ -88,6 +88,8 @@ class ShopifyProductService
 		'measurement.weight.value',
 		'measurement.weight.unit',
 	];
+	
+	private array $wireLog = [];
 
     public function __construct(private readonly ShopifyGraphQLService $graphql) {}
 
@@ -173,7 +175,7 @@ class ShopifyProductService
                 }
             }
 
-            $pageInfo = $response['data']['products']['pageInfo'] ?? [];
+            $pageInfo = $response['products']['pageInfo'] ?? [];
             $hasNextPage = $pageInfo['hasNextPage'] ?? false;
             $cursor = $pageInfo['endCursor'] ?? null;
         }
@@ -188,48 +190,101 @@ class ShopifyProductService
           products(first: $first, after: $after) {
             edges {
               node {
-                id
-                title
-                descriptionHtml
-                handle
-                status
-                vendor
-                productType
-                tags
-                createdAt
-                updatedAt
-                variants(first: 100) {
-                  edges {
-                    node {
-                      id
-                      title
-                      sku
-                      barcode
-                      price
-                      compareAtPrice
-                      inventoryQuantity
-                      taxable
-                      inventoryPolicy
-                      inventoryItem {
-                        id
-                      }
-                    }
-                  }
-                }
-                images(first: 10) {
-                  edges {
-                    node {
-                      id
-                      url
-                      altText
-                    }
-                  }
-                }
+                ...ProductFields
               }
             }
             pageInfo {
               hasNextPage
               endCursor
+            }
+          }
+        }
+        fragment ProductFields on Product {
+          id
+          title
+          descriptionHtml
+          handle
+          status
+          vendor
+          productType
+          tags
+          templateSuffix
+          publishedAt
+          onlineStoreUrl
+          createdAt
+          updatedAt
+          seo {
+            title
+            description
+          }
+          options {
+            id
+            name
+            position
+            values
+          }
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                title
+                sku
+                barcode
+                price
+                compareAtPrice
+                inventoryQuantity
+                taxable
+                inventoryPolicy
+                position
+                selectedOptions {
+                  name
+                  value
+                }
+                inventoryItem {
+                  id
+                  tracked
+                  requiresShipping
+                  harmonizedSystemCode
+                  countryCodeOfOrigin
+                  measurement {
+                    weight {
+                      value
+                      unit
+                    }
+                  }
+                }
+              }
+            }
+          }
+          images(first: 10) {
+            edges {
+              node {
+                id
+                url
+                altText
+                width
+                height
+              }
+            }
+          }
+          metafields(first: 20) {
+            edges {
+              node {
+                id
+                namespace
+                key
+                value
+                type
+              }
+            }
+          }
+          collections(first: 10) {
+            edges {
+              node {
+                id
+                title
+                handle
+              }
             }
           }
         }
@@ -243,48 +298,101 @@ class ShopifyProductService
           products(first: $first, query: $query, after: $after) {
             edges {
               node {
-                id
-                title
-                descriptionHtml
-                handle
-                status
-                vendor
-                productType
-                tags
-                createdAt
-                updatedAt
-                variants(first: 100) {
-                  edges {
-                    node {
-                      id
-                      title
-                      sku
-                      barcode
-                      price
-                      compareAtPrice
-                      inventoryQuantity
-                      taxable
-                      inventoryPolicy
-                      inventoryItem {
-                        id
-                      }
-                    }
-                  }
-                }
-                images(first: 10) {
-                  edges {
-                    node {
-                      id
-                      url
-                      altText
-                    }
-                  }
-                }
+                ...ProductFields
               }
             }
             pageInfo {
               hasNextPage
               endCursor
+            }
+          }
+        }
+        fragment ProductFields on Product {
+          id
+          title
+          descriptionHtml
+          handle
+          status
+          vendor
+          productType
+          tags
+          templateSuffix
+          publishedAt
+          onlineStoreUrl
+          createdAt
+          updatedAt
+          seo {
+            title
+            description
+          }
+          options {
+            id
+            name
+            position
+            values
+          }
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                title
+                sku
+                barcode
+                price
+                compareAtPrice
+                inventoryQuantity
+                taxable
+                inventoryPolicy
+                position
+                selectedOptions {
+                  name
+                  value
+                }
+                inventoryItem {
+                  id
+                  tracked
+                  requiresShipping
+                  harmonizedSystemCode
+                  countryCodeOfOrigin
+                  measurement {
+                    weight {
+                      value
+                      unit
+                    }
+                  }
+                }
+              }
+            }
+          }
+          images(first: 10) {
+            edges {
+              node {
+                id
+                url
+                altText
+                width
+                height
+              }
+            }
+          }
+          metafields(first: 20) {
+            edges {
+              node {
+                id
+                namespace
+                key
+                value
+                type
+              }
+            }
+          }
+          collections(first: 10) {
+            edges {
+              node {
+                id
+                title
+                handle
+              }
             }
           }
         }
@@ -308,10 +416,12 @@ class ShopifyProductService
     public function create(array $productData): array
     {
         [$input, $media] = $this->toGraphQLInput($productData);
+		
+		
+		$query = $this->productCreateMutation();
+		$this->recordWire('productCreate', $query, ['product' => $input, 'media' => $media ?: null]);
+		$data   = $this->graphql->query($query, ['product' => $input, 'media' => $media ?: null]);
 
-        $data   = $this->graphql->query($this->productMutation('productCreate'), [
-            'input' => $input, 'media' => $media ?: null,
-        ]);
         $errors = $this->graphql->extractUserErrors($data, 'productCreate');
 
         if (!empty($errors)) {
@@ -332,10 +442,12 @@ class ShopifyProductService
     {
         [$input, $media] = $this->toGraphQLInput($productData);
         $input['id']     = $this->toGid('Product', $shopifyProductId);
+		
+		$query = $this->productUpdateMutation();
+		$this->recordWire('productUpdate', $query, ['input' => $input, 'media' => $media ?: null]);
 
-        $data   = $this->graphql->query($this->productMutation('productUpdate'), [
-            'input' => $input, 'media' => $media ?: null,
-        ]);
+		$data = $this->graphql->query($query, ['input' => $input, 'media' => $media ?: null]);
+
         $errors = $this->graphql->extractUserErrors($data, 'productUpdate');
 
         if (!empty($errors)) {
@@ -393,8 +505,11 @@ class ShopifyProductService
 		}
 		GQL;
 
+
 		$input = $this->toGraphQLVariantInput($payload);
 		$input['id'] = $variantGid;
+		
+		$this->recordWire('productVariantsBulkUpdate', $mutation, ['productId' => $productGid, 'variants' => [$input]]);
 
 		$this->graphql->query($mutation, [
 			'productId' => $productGid,
@@ -430,6 +545,8 @@ class ShopifyProductService
 			fn($v) => $this->toGraphQLVariantInput($v),
 			$variants
 		);
+		
+		$this->recordWire('productVariantsBulkCreate', $mutation, ['productId' => $productGid, 'variants' => $variantsInput]);
 
 		$data = $this->graphql->query($mutation, [
 			'productId' => $productGid,
@@ -452,9 +569,92 @@ class ShopifyProductService
             $query = <<<'GQL'
             query getProduct($id: ID!) {
                 product(id: $id) {
-                    id title handle status
+                    id
+                    title
+                    descriptionHtml
+                    handle
+                    status
+                    vendor
+                    productType
+                    tags
+                    templateSuffix
+                    publishedAt
+                    onlineStoreUrl
+                    createdAt
+                    updatedAt
+                    seo {
+                        title
+                        description
+                    }
+                    options {
+                        id
+                        name
+                        position
+                        values
+                    }
                     variants(first: 100) {
-                        edges { node { id sku price compareAtPrice inventoryItem { id } } }
+                        edges {
+                            node {
+                                id
+                                title
+                                sku
+                                barcode
+                                price
+                                compareAtPrice
+                                inventoryQuantity
+                                taxable
+                                inventoryPolicy
+                                position
+                                selectedOptions {
+                                    name
+                                    value
+                                }
+                                inventoryItem {
+                                    id
+                                    tracked
+                                    requiresShipping
+                                    harmonizedSystemCode
+                                    countryCodeOfOrigin
+                                    measurement {
+                                        weight {
+                                            value
+                                            unit
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    images(first: 10) {
+                        edges {
+                            node {
+                                id
+                                url
+                                altText
+                                width
+                                height
+                            }
+                        }
+                    }
+                    metafields(first: 20) {
+                        edges {
+                            node {
+                                id
+                                namespace
+                                key
+                                value
+                                type
+                            }
+                        }
+                    }
+                    collections(first: 10) {
+                        edges {
+                            node {
+                                id
+                                title
+                                handle
+                            }
+                        }
                     }
                 }
             }
@@ -534,9 +734,33 @@ class ShopifyProductService
 
         foreach ($payload as $key => $value) {
             if (in_array($key, self::STRUCTURAL, true)) continue;
+			if (str_starts_with($key, 'metafield:')) continue;
 
             $this->applyTemplateKey($input, $key, $value);
         }
+		
+		
+		$metafields = [];
+		foreach ($payload as $key => $value) {
+			if (!str_starts_with($key, 'metafield:')) continue;
+			if ($value === null || $value === '') continue;
+
+			// metafield:custom.material:single_line_text_field
+			$spec = substr($key, strlen('metafield:'));
+			[$nsKey, $type] = array_pad(explode(':', $spec, 2), 2, 'single_line_text_field');
+			[$namespace, $mkey] = array_pad(explode('.', $nsKey, 2), 2, null);
+			if (!$namespace || !$mkey) continue;
+
+			$metafields[] = [
+				'namespace' => $namespace,
+				'key'       => $mkey,
+				'type'      => $type,
+				'value'     => is_array($value) ? json_encode($value) : (string) $value,
+			];
+		}
+		if ($metafields) {
+			$input['metafields'] = $metafields;
+		}
 
         // images → CreateMediaInput[]
         if (!empty($payload['images'])) {
@@ -854,22 +1078,39 @@ class ShopifyProductService
     // GQL mutation strings
     // ─────────────────────────────────────────────────────────────────────
 
-    private function productMutation(string $name): string
-    {
-        return <<<GQL
-        mutation {$name}(\$input: ProductInput!, \$media: [CreateMediaInput!]) {
-            {$name}(input: \$input, media: \$media) {
-                product {
-                    id title handle status
-                    variants(first: 100) {
-                        edges { node { id sku price compareAtPrice inventoryItem { id } } }
-                    }
-                }
-                userErrors { field message }
-            }
-        }
-        GQL;
-    }
+    private function productCreateMutation(): string
+	{
+		return <<<'GQL'
+		mutation productCreate($product: ProductCreateInput!, $media: [CreateMediaInput!]) {
+			productCreate(product: $product, media: $media) {
+				product {
+					id title handle status
+					variants(first: 100) {
+						edges { node { id sku price compareAtPrice inventoryItem { id } } }
+					}
+				}
+				userErrors { field message }
+			}
+		}
+		GQL;
+	}
+
+	private function productUpdateMutation(): string
+	{
+		return <<<'GQL'
+		mutation productUpdate($input: ProductInput!, $media: [CreateMediaInput!]) {
+			productUpdate(input: $input, media: $media) {
+				product {
+					id title handle status
+					variants(first: 100) {
+						edges { node { id sku price compareAtPrice inventoryItem { id } } }
+					}
+				}
+				userErrors { field message }
+			}
+		}
+		GQL;
+	}
 
     // ─────────────────────────────────────────────────────────────────────
     // Response normalizer — GQL response → REST-like shape for callers
@@ -879,22 +1120,94 @@ class ShopifyProductService
     {
         $variants = array_map(function ($edge) {
             $v = $edge['node'];
+            $inventoryItem = $v['inventoryItem'] ?? [];
+            $weight = $inventoryItem['measurement']['weight'] ?? null;
             return [
-                'id'                => $this->fromGid($v['id']),
-                'sku'               => $v['sku']            ?? '',
-                'price'             => $v['price']          ?? '0.00',
-                'compare_at_price'  => $v['compareAtPrice'] ?? null,
-                'inventory_item_id' => isset($v['inventoryItem']['id'])
-                    ? $this->fromGid($v['inventoryItem']['id']) : null,
+                'id'                     => $this->fromGid($v['id']),
+                'title'                  => $v['title']             ?? null,
+                'sku'                    => $v['sku']               ?? '',
+                'barcode'                => $v['barcode']           ?? null,
+                'price'                  => $v['price']             ?? '0.00',
+                'compare_at_price'       => $v['compareAtPrice']    ?? null,
+                'inventory_quantity'     => $v['inventoryQuantity'] ?? null,
+                'taxable'                => $v['taxable']           ?? null,
+                'inventory_policy'       => $v['inventoryPolicy']   ?? null,
+                'position'               => $v['position']          ?? null,
+                'selected_options'       => $v['selectedOptions']   ?? [],
+                'inventory_item_id'      => isset($inventoryItem['id'])
+                    ? $this->fromGid($inventoryItem['id']) : null,
+                'inventory_tracked'      => $inventoryItem['tracked']              ?? null,
+                'requires_shipping'      => $inventoryItem['requiresShipping']     ?? null,
+                'harmonized_system_code' => $inventoryItem['harmonizedSystemCode'] ?? null,
+                'country_code_of_origin' => $inventoryItem['countryCodeOfOrigin']  ?? null,
+                'weight'                 => $weight['value'] ?? null,
+                'weight_unit'            => $weight['unit']  ?? null,
             ];
         }, $p['variants']['edges'] ?? []);
 
+        $images = array_map(function ($edge) {
+            $img = $edge['node'];
+            return [
+                'id'       => isset($img['id']) ? $this->fromGid($img['id']) : null,
+                'url'      => $img['url']     ?? $img['src'] ?? null,
+                'alt_text' => $img['altText'] ?? null,
+                'width'    => $img['width']   ?? null,
+                'height'   => $img['height']  ?? null,
+            ];
+        }, $p['images']['edges'] ?? []);
+
+        $metafields = array_map(function ($edge) {
+            $m = $edge['node'];
+            return [
+                'id'        => isset($m['id']) ? $this->fromGid($m['id']) : null,
+                'namespace' => $m['namespace'] ?? null,
+                'key'       => $m['key']       ?? null,
+                'value'     => $m['value']     ?? null,
+                'type'      => $m['type']      ?? null,
+            ];
+        }, $p['metafields']['edges'] ?? []);
+
+        $collections = array_map(function ($edge) {
+            $c = $edge['node'];
+            return [
+                'id'     => isset($c['id']) ? $this->fromGid($c['id']) : null,
+                'title'  => $c['title']  ?? null,
+                'handle' => $c['handle'] ?? null,
+            ];
+        }, $p['collections']['edges'] ?? []);
+
+        $options = array_map(function ($opt) {
+            return [
+                'id'       => isset($opt['id']) ? $this->fromGid($opt['id']) : null,
+                'name'     => $opt['name']     ?? null,
+                'position' => $opt['position'] ?? null,
+                'values'   => $opt['values']   ?? [],
+            ];
+        }, $p['options'] ?? []);
+
         return [
-            'id'       => $this->fromGid($p['id']),
-            'title'    => $p['title']  ?? '',
-            'handle'   => $p['handle'] ?? '',
-            'status'   => strtolower($p['status'] ?? 'draft'),
-            'variants' => $variants,
+            'id'               => $this->fromGid($p['id']),
+            'title'            => $p['title']            ?? '',
+            'handle'           => $p['handle']           ?? '',
+            'status'           => strtolower($p['status'] ?? 'draft'),
+            'description_html' => $p['descriptionHtml']  ?? null,
+            'vendor'           => $p['vendor']           ?? null,
+            'product_type'     => $p['productType']      ?? null,
+            'tags'             => $p['tags']             ?? [],
+            'template_suffix'  => $p['templateSuffix']   ?? null,
+            'published_at'     => $p['publishedAt']      ?? null,
+            'online_store_url' => $p['onlineStoreUrl']   ?? null,
+            'created_at'       => $p['createdAt']        ?? null,
+            'updated_at'       => $p['updatedAt']        ?? null,
+            'seo'              => [
+                'title'       => $p['seo']['title']       ?? null,
+                'description' => $p['seo']['description'] ?? null,
+            ],
+            'options'     => $options,
+            'variants'    => $variants,
+            'images'      => $images,
+            'metafields'  => $metafields,
+            'collections' => $collections,
         ];
     }
 
@@ -946,6 +1259,12 @@ class ShopifyProductService
             return ProductFieldConfig::where('ecom_driver', $ecomDriver)
                 ->where('erp_driver', $erpDriver)
                 ->where('is_active', true)
+                // Only the erp→ecom config set. Existing rows are NULL/'erp_to_ecom'
+                // and stay included; only the new 'ecom_to_erp' set is excluded.
+                ->where(function ($q) {
+                    $q->whereNull('direction')
+                      ->orWhere('direction', '!=', 'ecom_to_erp');
+                })
                 ->orderBy('sort_order')
                 ->orderBy('id')
                 ->get()
@@ -1014,18 +1333,37 @@ class ShopifyProductService
 
         return $data[$key] ?? null;
     }
+	
+	
 
     private function applyTransform(mixed $value, ?string $transform, array $context = []): mixed
-    {
-        return match ($transform) {
-            'number_format'          => number_format((float)($value ?? 0), 2, '.', ''),
-            'number_format_nullable' => ($value > 0) ? number_format((float)$value, 2, '.', '') : null,
-            'boolean_status'         => (!empty($value) || !empty($context['website_published']) || !empty($context['is_published'])) ? 'active' : 'draft',
-            'array_second'           => is_array($value) ? ($value[1] ?? null) : $value,
-            'base64_image'           => !empty($value) ? [['attachment' => $value]] : null,
-            default                  => $value,
-        };
-    }
+	{
+		// Value translation through ChannelMapping: "channel_map:category", "channel_map:warehouse", etc.
+		if (is_string($transform) && str_starts_with($transform, 'channel_map:')) {
+			$type   = substr($transform, 12);
+			$odooId = is_array($value) ? ($value[0] ?? null) : $value;   // categ_id is [2,"Expenses"] → 2
+			if ($odooId === null || $odooId === false || $odooId === '') return null;
+
+			return \App\Models\ChannelMapping::query()
+				->where('type', $type)
+				->whereIn('channel', [
+					\App\Models\ChannelMapping::CHANNEL_SHOPIFY,
+					\App\Models\ChannelMapping::CHANNEL_BOTH,
+				])
+				->where('odoo_id', $odooId)
+				->where('is_active', true)
+				->value('external_id');   // the GID, or null
+		}
+
+		return match ($transform) {
+			'number_format'          => number_format((float)($value ?? 0), 2, '.', ''),
+			'number_format_nullable' => ($value > 0) ? number_format((float)$value, 2, '.', '') : null,
+			'boolean_status'         => (!empty($value) || !empty($context['website_published']) || !empty($context['is_published'])) ? 'active' : 'draft',
+			'array_second'           => is_array($value) ? ($value[1] ?? null) : $value,
+			'base64_image'           => !empty($value) ? [['attachment' => $value]] : null,
+			default                  => $value,
+		};
+	}
 
     private function applyLengthConstraints(mixed $value, array $config): mixed
     {
@@ -1036,4 +1374,16 @@ class ShopifyProductService
         }
         return $value;
     }
+	
+	private function recordWire(string $action, string $query, array $variables): void
+	{
+		$this->wireLog[] = ['action' => $action, 'query' => $query, 'variables' => $variables];
+	}
+
+	public function takeWireLog(): array
+	{
+		$log = $this->wireLog;
+		$this->wireLog = [];
+		return $log;
+	}
 }

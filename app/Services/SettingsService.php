@@ -331,6 +331,11 @@ class SettingsService
     {
         return $this->get('shopify_shop') ?? env('SHOPIFY_SHOP', '');
     }
+	
+	public function shopifyVersion(): string
+    {
+        return $this->get('shopify_api_version') ?? env('shopify_api_version', '');
+    }
 
     public function shopifyAccessToken(): string
     {

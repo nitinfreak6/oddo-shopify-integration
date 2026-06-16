@@ -42,17 +42,20 @@ class ProductCacheService
 
     public function fetchAndCacheSingle(int $erpId, bool $forceRefetch = false): ProductCache
     {
-        $product = $this->erp->getProductById($erpId);
+        // Lightweight fetch — only used to read write_date for the staleness check.
+        // We avoid fetching all fields here because the full fetch (below) is heavier
+        // and we only want to do it when the product has actually changed.
+        $slim = $this->erp->getProductById($erpId);
 
-        if (!$product) {
+        if (!$slim) {
             throw new \RuntimeException("ERP product #{$erpId} not found in {$this->erp->driverName()}.");
         }
 
         // Skip re-cache if write_date hasn't changed since last fetch — unless forced
         if (!$forceRefetch) {
-            $erpIdCol  = ProductCache::erpIdColumn();
-            $existing  = ProductCache::where($erpIdCol, $erpId)->first();
-            $erpWriteDate = $product['write_date'] ?? null;
+            $erpIdCol     = ProductCache::erpIdColumn();
+            $existing     = ProductCache::where($erpIdCol, $erpId)->first();
+            $erpWriteDate = $slim['write_date'] ?? null;
 
             if ($existing && $erpWriteDate && $existing->fetched_at) {
                 $fetchedAt    = \Carbon\Carbon::parse($existing->fetched_at);
@@ -67,7 +70,13 @@ class ProductCacheService
             }
         }
 
-        return $this->cacheProduct($product);
+        // Full fetch — retrieves ALL Odoo fields (not just the whitelist) so the
+        // Raw ERP JSON tab on the product detail page shows every field.
+        $fullProduct = method_exists($this->erp, 'getProductByIdFull')
+            ? ($this->erp->getProductByIdFull($erpId) ?? $slim)
+            : $slim;
+
+        return $this->cacheProduct($fullProduct);
     }
 
     public function cacheProduct(array $template): ProductCache
@@ -84,6 +93,13 @@ class ProductCacheService
         $attributeValues = $avIds
             ? $this->erp->getAttributeValues(array_unique($avIds))
             : [];
+			
+		$vendors = method_exists($this->erp, 'getVendorsForTemplate')
+			? $this->erp->getVendorsForTemplate($erpId)
+			: [];
+			
+		$template['_primary_vendor'] = $vendors[0]['partner_id'][1] ?? null;  // ← this line
+
 
         $data = [
             'fetched_at'       => now()->toISOString(),
@@ -91,6 +107,7 @@ class ProductCacheService
             'odoo_id'          => $erpId,
             'template'         => $template,
             'variants'         => $variants,
+			'vendors' => $vendors,
             'attribute_values' => $attributeValues,
         ];
 

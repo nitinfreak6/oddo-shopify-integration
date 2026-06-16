@@ -14,6 +14,7 @@ class ProductFieldConfig extends Model
 
     protected $fillable = [
         'entity_type',          // product, sales_order, customer, inventory, dispatch
+        'direction',            // erp_to_ecom | ecom_to_erp
         'ecom_driver',          // shopify, woocommerce, magento
         'ecom_field',           // title, regular_price, order_number
         'ecom_field_label',
@@ -61,6 +62,7 @@ class ProductFieldConfig extends Model
             'array_second'         => 'Array Second Value (e.g. [id, name] → name)',
             'base64_image'         => 'Base64 Image → Shopify images array',
 			'line_container' => 'Line Container (maps array of line items to ERP ORM commands)',
+			'channel_map:category' => 'Channel Map — Category → Shopify GID',
 
         ];
     }

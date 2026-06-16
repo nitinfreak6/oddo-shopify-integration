@@ -41,9 +41,11 @@ class MappingController extends Controller
         $mappings = $query->paginate($perPage)->withQueryString();
         $labels   = ChannelMapping::typeLabels();
         $icons    = ChannelMapping::typeIcons();
+		
+		$typeNoun = ucfirst($type); 
 
         return view('dashboard.mappings.index', compact(
-            'type', 'channel', 'search', 'mappings', 'labels', 'icons', 'perPage'
+            'type', 'channel', 'search', 'mappings', 'typeNoun', 'labels', 'icons', 'perPage'
         ));
     }
 
@@ -256,13 +258,11 @@ class MappingController extends Controller
      * Fetch Shopify/Ecom fields for a mapping type (static definitions).
      */
     public function fetchEcomFields(Request $request, string $type): \Illuminate\Http\JsonResponse
-    {
-        abort_unless(in_array($type, $this->validTypes), 404);
-
-        $raw    = $this->shopifyFieldsForType($type);
-        $fields = array_map(fn($key, $label) => ['key' => $key, 'label' => $label], array_keys($raw), array_values($raw));
-
-        return response()->json(['fields' => $fields, 'type' => $type]);
-    }
+	{
+		abort_unless(in_array($type, $this->validTypes), 404);
+		$fields = app(\App\Services\Ecom\EcomInterface::class)
+					->getMappingOptions($type, $request->query('q'));
+		return response()->json(['fields' => $fields, 'type' => $type]);
+	}
 
 }

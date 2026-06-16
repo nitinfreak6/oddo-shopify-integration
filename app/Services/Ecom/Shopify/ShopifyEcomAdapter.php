@@ -49,7 +49,7 @@ class ShopifyEcomAdapter implements EcomInterface
         return $this->products->list($filters);
     }
 
-    public function getProduct(string|int $id): array
+    public function getProduct(string|int $id): ?array
     {
         return $this->products->get($id);
     }
@@ -260,15 +260,32 @@ class ShopifyEcomAdapter implements EcomInterface
      * implements this method and its fields appear in the mapping UI.
      */
     public function getAvailableFields(string $entityType): array
-    {
-        return match ($entityType) {
-            'product'     => array_merge($this->templateFields(), $this->variantFields()),
-            'sales_order' => $this->orderFields(),
-            'customer'    => $this->customerFields(),
-            'dispatch'    => $this->fulfillmentFields(),
-            default       => [],
-        };
-    }
+	{
+		if ($entityType === 'product') {
+			$template = $this->introspectInputType('ProductInput', 'template')
+						?: $this->templateFields();              // fallback if introspection fails
+			return array_merge($template, $this->variantFields());
+		}
+		return match ($entityType) {
+			'sales_order' => $this->orderFields(),
+			'customer'    => $this->customerFields(),
+			'dispatch'    => $this->fulfillmentFields(),
+			default       => [],
+		};
+	}
+
+	private function introspectInputType(string $typeName, string $scope): array
+	{
+		try {
+			$q = 'query($n:String!){ __type(name:$n){ inputFields { name } } }';
+			$data  = app(\App\Services\Shopify\ShopifyGraphQLService::class)->query($q, ['n' => $typeName]);
+			$names = array_column($data['__type']['inputFields'] ?? [], 'name');
+			return array_map(fn($n) => ['key' => $n, 'label' => $n, 'scope' => $scope], $names);
+		} catch (\Throwable $e) {
+			\Illuminate\Support\Facades\Log::warning("Shopify introspect {$typeName} failed: " . $e->getMessage());
+			return [];
+		}
+	}
 
     /** @return array<int,array{key:string,label:string,scope:string}> */
     private function templateFields(): array
@@ -483,4 +500,45 @@ class ShopifyEcomAdapter implements EcomInterface
             array_values($fields)
         );
     }
+	
+	
+	public function getMappingOptions(string $type, ?string $search = null): array
+	{
+		return match ($type) {
+			'category'  => $this->taxonomyOptions($search),
+			'warehouse' => $this->locationOptions(),
+			
+			default     => [],
+		};
+	}
+
+	private function locationOptions(): array
+	{
+		$q = 'query { locations(first: 100, includeInactive: false) {
+				edges { node { id name } } } }';
+		$data  = app(\App\Services\Shopify\ShopifyGraphQLService::class)->query($q);
+		$edges = $data['locations']['edges'] ?? [];
+		return array_map(fn($e) => [
+			'id'    => $e['node']['id'],     // gid://shopify/Location/123…  → external_id
+			'label' => $e['node']['name'],   // → external_label
+		], $edges);
+	}
+
+	private function taxonomyOptions(?string $search): array
+	{
+		$q = 'query($s:String){ taxonomy { categories(first: 50, search: $s) {
+				edges { node { id fullName } } } } }';
+		$data  = app(\App\Services\Shopify\ShopifyGraphQLService::class)
+					->query($q, $search ? ['s' => $search] : []);
+		$edges = $data['taxonomy']['categories']['edges'] ?? [];
+		return array_map(fn($e) => [
+			'id'    => $e['node']['id'],        // gid → external_id
+			'label' => $e['node']['fullName'],  // → external_label
+		], $edges);
+	}
+	
+	public function takeWireLog(): array
+	{
+		return method_exists($this->products, 'takeWireLog') ? $this->products->takeWireLog() : [];
+	}
 }

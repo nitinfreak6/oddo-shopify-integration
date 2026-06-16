@@ -36,15 +36,19 @@ class FieldMappingService
         string $entityType,
         string $ecomDriver,
         string $erpDriver,
-        ?string $scope = null
+        ?string $scope = null,
+        ?string $direction = null
     ): \Illuminate\Support\Collection {
         $cacheKey = ProductFieldConfig::cacheKey($entityType, $ecomDriver, $erpDriver);
         
         if ($scope) {
             $cacheKey .= "_{$scope}";
         }
+        if ($direction) {
+            $cacheKey .= "_{$direction}";
+        }
         
-        return Cache::rememberForever($cacheKey, function () use ($entityType, $ecomDriver, $erpDriver, $scope) {
+        return Cache::rememberForever($cacheKey, function () use ($entityType, $ecomDriver, $erpDriver, $scope, $direction) {
             $query = ProductFieldConfig::active()
                 ->forEntity($entityType)
                 ->forDriverPair($ecomDriver, $erpDriver)
@@ -52,6 +56,12 @@ class FieldMappingService
             
             if ($scope) {
                 $query->where('scope', $scope);
+            }
+
+            // Only filter when asked. Existing erp→ecom callers pass null and are
+            // unaffected; the ecom→erp builder passes 'ecom_to_erp' explicitly.
+            if ($direction) {
+                $query->where('direction', $direction);
             }
             
             return $query->get();
@@ -159,6 +169,134 @@ class FieldMappingService
         }
         
         return $erpData;
+    }
+
+    /**
+     * Build a complete ERP payload from a raw ecom entity, driven entirely by
+     * product_field_configs rows where direction = 'ecom_to_erp'.
+     *
+     * This is the MIRROR of the erp→ecom reader: source = ecom_field,
+     * target = erp_field, using the SAME `transform` column and the same
+     * field_type handling ('custom' = constant, else read+transform). There is
+     * no reverse_transform. Template-scope fields read from the entity root;
+     * variant-scope fields read from the first variant.
+     */
+    public function buildErpProductPayload(
+        array $ecomProduct,
+        string $ecomDriver,
+        string $erpDriver,
+        string $entityType = 'product'
+    ): array {
+        $configs = $this->getMappings($entityType, $ecomDriver, $erpDriver, null, 'ecom_to_erp');
+        $firstVariant = $ecomProduct['variants'][0] ?? [];
+
+        $payload = [];
+
+        foreach ($configs as $config) {
+            $erpField = $config->erp_field ?: $config->odoo_field;
+            if (empty($erpField)) {
+                continue; // ecom-only field, nothing to write to ERP
+            }
+
+            // Variant-scope fields come from the first variant; everything else
+            // from the entity root.
+            $source = ($config->scope === 'variant') ? $firstVariant : $ecomProduct;
+
+            $value = $this->resolveEcomValue($source, $ecomProduct, $config);
+
+            // Drop nulls so a missing source never blanks/breaks an ERP field.
+            if ($value !== null) {
+                $payload[$erpField] = $value;
+            }
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Resolve a single ecom→erp value. Mirror of the erp→ecom resolveValue:
+     * 'custom' returns the constant default; otherwise read the ecom_field,
+     * apply `transform`, then fall back to default_value.
+     */
+    private function resolveEcomValue(array $source, array $rootEntity, ProductFieldConfig $config): mixed
+    {
+        if ($config->field_type === 'custom') {
+            return $config->default_value;
+        }
+
+        $ecomField = $config->ecom_field ?: $config->shopify_field;
+        $raw = $this->readEcomField($source, (string) ($ecomField ?? ''));
+
+        $value = $config->transform
+            ? $this->applyConfigTransform($raw, $config->transform, $rootEntity)
+            : $raw;
+
+        if ($value === null || $value === '' || $value === false) {
+            $value = $config->default_value;
+        }
+
+        return $value;
+    }
+
+    /**
+     * Read a value from ecom data. Supports dot/index paths
+     * (e.g. "variants.0.price", "seo.title").
+     */
+    private function readEcomField(array $data, string $key): mixed
+    {
+        if ($key === '') return null;
+
+        if (!str_contains($key, '.')) {
+            return $data[$key] ?? null;
+        }
+
+        $val = $data;
+        foreach (explode('.', $key) as $seg) {
+            if (is_array($val) && array_key_exists($seg, $val)) {
+                $val = $val[$seg];
+            } elseif (is_array($val) && ctype_digit($seg) && array_key_exists((int) $seg, $val)) {
+                $val = $val[(int) $seg];
+            } else {
+                return null;
+            }
+        }
+        return $val;
+    }
+
+    /**
+     * Transform applier for ecom→erp. Superset of the common transforms so any
+     * value the config author selects in the single `transform` column works.
+     */
+    public function applyConfigTransform(mixed $value, ?string $transform, array $context = []): mixed
+    {
+        if (!$transform) return $value;
+
+        if (str_starts_with($transform, 'channel_map:')) {
+            // Map an ecom value → ERP id via ChannelMapping (e.g. category).
+            $type     = substr($transform, 12);
+            $ecomVal  = is_array($value) ? ($value[0] ?? null) : $value;
+            if ($ecomVal === null || $ecomVal === '' || $ecomVal === false) return null;
+
+            return \App\Models\ChannelMapping::query()
+                ->where('type', $type)
+                ->where('external_id', $ecomVal)
+                ->value('odoo_id');
+        }
+
+        return match ($transform) {
+            'number_format'          => number_format((float) $value, 2, '.', ''),
+            'number_format_nullable' => ((float) $value) == 0.0 ? null : number_format((float) $value, 2, '.', ''),
+            'parse_float'            => (float) $value,
+            'parse_float_nullable'   => empty($value) ? null : (float) $value,
+            'parse_int'              => (int) $value,
+            'strip_tags'             => strip_tags((string) $value),
+            'boolean_status'         => !empty($value) ? 'active' : 'draft',
+            'status_to_boolean'      => in_array($value, ['active', 'publish', 'published', true, 1], true),
+            'array_second'           => is_array($value) ? ($value[1] ?? null) : $value,
+            'pass_through'           => $value,
+            'skip'                   => null,
+            default                  => $value,
+        };
     }
 
     /**

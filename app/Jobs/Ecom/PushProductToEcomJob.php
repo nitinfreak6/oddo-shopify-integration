@@ -81,23 +81,36 @@ class PushProductToEcomJob implements ShouldQueue
             $ecomProductId = $ecom->syncProduct($template, $variants, $attributeValues);
 
             $cache->markEcomSent($this->erpId, $ecomProductId);
+			
+			$wire = method_exists($ecom, 'takeWireLog') ? $ecom->takeWireLog() : [];
 
             // Store response so Info tab shows it
             $log->update([
-                'status'           => SyncLog::STATUS_SUCCESS,
-                'response_payload' => json_encode([
-                    'id'              => $ecomProductId,
-                    'ecom_product_id' => $ecomProductId,
-                    'driver'          => $ecom->driverName(),
-                ]),
-                'synced_at' => now(),
-            ]);
+				'status'           => SyncLog::STATUS_SUCCESS,
+				'request_payload'  => $wire ? json_encode($wire, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null,
+				'response_payload' => json_encode([
+					'id' => $ecomProductId, 'ecom_product_id' => $ecomProductId, 'driver' => $ecom->driverName(),
+				]),
+				'synced_at' => now(),
+			]);
 
             Log::info("PushProductToEcomJob [{$ecom->driverName()}]: synced #{$this->erpId} → {$ecomProductId}");
 
         } catch (\Throwable $e) {
+            // Capture whatever was recorded before the exception so the
+            // product detail page shows the real GraphQL payload, not the
+            // intermediate buildPayload() output.
+            $wire = method_exists($ecom, 'takeWireLog') ? $ecom->takeWireLog() : [];
+
             $cache->markEcomFailed($this->erpId, $e->getMessage());
             $log->markFailed($e->getMessage());
+
+            if ($wire) {
+                $log->update([
+                    'request_payload' => json_encode($wire, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                ]);
+            }
+
             Log::error("PushProductToEcomJob [{$ecom->driverName()}]: failed #{$this->erpId} — " . $e->getMessage());
             throw $e;
         }

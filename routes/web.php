@@ -65,6 +65,8 @@ Route::middleware(['auth'])->prefix('dashboard')->name('dashboard')->group(funct
             Route::post('/fetch-dispatch',       [OrdersController::class, 'fetchDispatch']) ->name('.fetch-dispatch');
             Route::post('/post-dispatch',        [OrdersController::class, 'postDispatch'])  ->name('.post-dispatch');
             Route::get('/{erpId}/sales-info',    [OrdersController::class, 'salesInfo'])     ->name('.sales-info');
+			Route::get('/{erpId}/sales-info',    [OrdersController::class, 'salesInfo'])     ->name('.sales-info');
+			Route::get('/by-ecom/{ecomId}/sales-info', [OrdersController::class, 'salesInfoByEcom'])->name('.sales-info-by-ecom');
             Route::get('/{erpId}/dispatch-info', [OrdersController::class, 'dispatchInfo'])  ->name('.dispatch-info');
             Route::get('/{erpId}',               [OrdersController::class, 'show'])          ->name('.show');
             Route::post('/{erpId}/push',         [OrdersController::class, 'push'])          ->name('.push');

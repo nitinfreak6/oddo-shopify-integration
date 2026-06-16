@@ -35,6 +35,24 @@
 
 {{-- Order Header --}}
 @if($mapping)
+	
+{{-- Fetched payload — cached on fetch, visible before any post (mirrors product info page) --}}
+@php
+    $fetched = is_array($mapping->metadata)
+        ? $mapping->metadata
+        : json_decode($mapping->metadata ?? 'null', true);
+@endphp
+@if(!empty($fetched))
+<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 mb-4">
+    <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-semibold text-gray-700">
+            📦 Fetched {{ $mapping->erp_id ? $erpDisplayName : $ecomDisplayName }} Data
+        </h3>
+        <span class="text-xs text-gray-400">cached on fetch</span>
+    </div>
+    <pre class="bg-gray-50 rounded-lg p-3 text-xs text-gray-700 overflow-x-auto font-mono max-h-96 overflow-y-auto">{{ json_encode($fetched, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) }}</pre>
+</div>
+@endif
 <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 mb-4">
     <div class="flex items-start justify-between">
         <div>

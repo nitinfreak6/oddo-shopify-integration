@@ -215,6 +215,17 @@
             <input type="hidden" name="_method" x-ref="method" value="POST">
             <input type="hidden" name="entity_type" value="{{ $entityType }}">
 
+            {{-- Sync Direction — drives which side is dropdown vs free text --}}
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Sync Direction <span class="text-red-500">*</span></label>
+                <select name="direction" x-model="form.direction"
+                        class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
+                    <option value="erp_to_ecom">{{ $erpDisplayName }} → {{ $ecomDisplayName }}</option>
+                    <option value="ecom_to_erp">{{ $ecomDisplayName }} → {{ $erpDisplayName }}</option>
+                </select>
+                <p class="text-xs text-gray-400 mt-1">The <strong>source</strong> field is a dropdown; the <strong>destination</strong> (where we push) is free text.</p>
+            </div>
+
             {{-- Ecom Field --}}
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-1">
@@ -227,21 +238,33 @@
                         $ecomFields['variant_fields'] ?? []
                     );
                 @endphp
-                @if(!empty($allEcomFields))
-                <select name="ecom_field" x-model="form.ecom_field"
-                        @change="onEcomFieldChange()"
+
+                {{-- ecom→erp: Shopify is the SOURCE → dropdown --}}
+                <select x-show="form.direction === 'ecom_to_erp'"
+                        :value="form.ecom_field"
+                        @change="form.ecom_field = $event.target.value; onEcomFieldChange()"
                         class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
                     <option value="">— Select a {{ $ecomDisplayName }} field —</option>
                     @foreach($allEcomFields as $f)
                         <option value="{{ $f['key'] }}">{{ $f['label'] }} ({{ $f['key'] }})</option>
                     @endforeach
                 </select>
-                @else
-                <input type="text" name="ecom_field" x-model="form.ecom_field"
-                       placeholder="e.g. title, price"
-                       class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
-                <p class="text-xs text-gray-400 mt-1">Fetch {{ $ecomDisplayName }} fields above to get a dropdown.</p>
-                @endif
+
+                {{-- erp→ecom: Shopify is the DESTINATION → free text (unchanged) --}}
+                <div x-show="form.direction !== 'ecom_to_erp'">
+                    <input list="ecomFieldOptions" type="text" :value="form.ecom_field"
+                           @input="form.ecom_field = $event.target.value; onEcomFieldChange()" autocomplete="off"
+                           placeholder="e.g. title, vendor, productType"
+                           class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
+                    <datalist id="ecomFieldOptions">
+                        @foreach($allEcomFields as $f)
+                            <option value="{{ $f['key'] }}">{{ $f['label'] }}</option>
+                        @endforeach
+                    </datalist>
+                </div>
+
+                <p class="text-xs text-gray-400 mt-1">Type or pick a real {{ $ecomDisplayName }} field. Fetch fields to refresh the reference list.</p>
+                <input type="hidden" name="ecom_field" :value="form.ecom_field">
                 <input type="hidden" name="ecom_field_label" :value="form.ecom_field_label">
             </div>
 
@@ -280,21 +303,33 @@
                     <span x-text="form.field_type === 'combine' ? '{{ $erpDisplayName }} Field 1' : '{{ $erpDisplayName }} Field'"></span>
                 </label>
                 @php $erpFieldList = $erpFields['fields'] ?? array_merge($erpFields['template_fields'] ?? [], $erpFields['variant_fields'] ?? []); @endphp
-                @if(!empty($erpFieldList))
-                <select :value="form.erp_field"
-                        @change="form.erp_field = $event.target.value; onErpFieldChange()"
-                        class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
-                    <option value="">— Select a {{ $erpDisplayName }} field —</option>
-                    @foreach($erpFieldList as $f)
-                        <option value="{{ $f['key'] }}">{{ $f['label'] }} ({{ $f['key'] }})</option>
-                    @endforeach
-                </select>
-                @else
-                <input type="text" @input="form.erp_field = $event.target.value" :value="form.erp_field"
-                       placeholder="e.g. name, list_price"
-                       class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
-                <p class="text-xs text-gray-400 mt-1">Fetch {{ $erpDisplayName }} fields above to get a dropdown.</p>
-                @endif
+
+                {{-- erp→ecom: Odoo is the SOURCE → dropdown (unchanged) --}}
+                <div x-show="form.direction !== 'ecom_to_erp'">
+                    @if(!empty($erpFieldList))
+                    <select :value="form.erp_field"
+                            @change="form.erp_field = $event.target.value; onErpFieldChange()"
+                            class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
+                        <option value="">— Select a {{ $erpDisplayName }} field —</option>
+                        @foreach($erpFieldList as $f)
+                            <option value="{{ $f['key'] }}">{{ $f['label'] }} ({{ $f['key'] }})</option>
+                        @endforeach
+                    </select>
+                    @else
+                    <input type="text" @input="form.erp_field = $event.target.value" :value="form.erp_field"
+                           placeholder="e.g. name, list_price"
+                           class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
+                    <p class="text-xs text-gray-400 mt-1">Fetch {{ $erpDisplayName }} fields above to get a dropdown.</p>
+                    @endif
+                </div>
+
+                {{-- ecom→erp: Odoo is the DESTINATION (where we push) → free text --}}
+                <div x-show="form.direction === 'ecom_to_erp'">
+                    <input type="text" @input="form.erp_field = $event.target.value" :value="form.erp_field"
+                           placeholder="e.g. name, list_price, default_code"
+                           class="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-300 outline-none">
+                    <p class="text-xs text-gray-400 mt-1">Type the exact {{ $erpDisplayName }} field to write to.</p>
+                </div>
             </div>
 
             {{-- ERP Field 2 + Separator --}}
@@ -355,6 +390,7 @@
                     <option value="array_second">Array Second Value [id, name] → name</option>
                     <option value="base64_image">Base64 → image array</option>
                     <option value="line_container">Line Container (maps array of line items to ERP ORM commands)</option>
+                    <option value="channel_map:category">Channel Map — Category → Shopify GID</option>
                     <option value="parse_int">parse_int</option>
                 </select>
             </div>
@@ -424,6 +460,7 @@ function fieldConfigApp() {
         erpFields:  @json($erpFields['fields'] ?? array_merge($erpFields['template_fields'] ?? [], $erpFields['variant_fields'] ?? [])),
 
         form: {
+            direction: 'erp_to_ecom',
             ecom_field: '', ecom_field_label: '',
             field_type: 'default',
             erp_field: '', erp_field_label: '',
@@ -440,6 +477,7 @@ function fieldConfigApp() {
         openAdd() {
             this.editId = null;
             this.form = {
+                direction: 'erp_to_ecom',
                 ecom_field: '', ecom_field_label: '',
                 field_type: 'default',
                 erp_field: '', erp_field_label: '',
@@ -460,6 +498,7 @@ function fieldConfigApp() {
         openEdit(config) {
             this.editId = config.id;
             this.form = {
+                direction:         config.direction         || 'erp_to_ecom',
                 ecom_field:        config.ecom_field        || config.shopify_field       || '',
                 ecom_field_label:  config.ecom_field_label  || config.shopify_field_label || '',
                 field_type:        config.field_type        || 'default',

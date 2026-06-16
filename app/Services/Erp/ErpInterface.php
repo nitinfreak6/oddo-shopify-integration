@@ -32,6 +32,15 @@ interface ErpInterface
      * Return a single product template by ERP ID (for cache re-fetch).
      */
     public function getProductById(int $erpId): ?array;
+	
+	
+	/**
+	 * Read the COMPLETE record for one product (no field whitelist), for the
+	 * product detail/info page. Bulk fetches stay lean; this is on-demand.
+	 * Adapters with no concept of a reduced field set may return the same as
+	 * getProductById().
+	 */
+	public function getProductByIdFull(int $erpId): ?array;
 
     /**
      * Return product variants for a list of template IDs.

@@ -11,6 +11,7 @@ use App\Models\SyncMapping;
 use App\Services\SettingsService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 class ProductsController extends Controller
 {
@@ -43,6 +44,7 @@ class ProductsController extends Controller
         $ecomDriver   = $this->settings->ecomDriver();
         $shopifyStore = $this->settings->shopifyShop() ?: config('shopify.shop', '—');
 
+
         return view('dashboard.products', compact(
             'products', 'search', 'status', 'perPage', 'stats',
             'syncMode', 'ecomDriver', 'shopifyStore', 'direction'
@@ -64,7 +66,7 @@ class ProductsController extends Controller
 
             if (empty($products)) {
                 $state->markComplete($writeDate, 'nothing_changed');
-                return back()->with('info', 'No new or updated products in ' . $this->settings->erpDisplayName() . ' since last sync.');
+                return redirect()->route('dashboard.products')->with('info', 'No new or updated products in ' . $this->settings->erpDisplayName() . ' since last sync.');
             }
 
             $fetched         = 0;
@@ -82,10 +84,10 @@ class ProductsController extends Controller
             $cursor = date('Y-m-d H:i:s', strtotime($latestWriteDate) + 1);
             $state->markComplete($cursor, "synced:{$fetched}");
 
-            return back()->with('success', "{$fetched} product(s) fetched from " . $this->settings->erpDisplayName() . '. Use "Push to ' . $this->settings->ecomDisplayName() . '" to sync.');
+            return redirect()->route('dashboard.products')->with('success', "{$fetched} product(s) fetched from " . $this->settings->erpDisplayName() . '. Use "Push to ' . $this->settings->ecomDisplayName() . '" to sync.');
 
         } catch (\Throwable $e) {
-            return back()->with('error', 'Fetch from ERP failed: ' . $e->getMessage());
+            return redirect()->route('dashboard.products')->with('error', 'Fetch from ERP failed: ' . $e->getMessage());
         }
     }
 
@@ -97,17 +99,17 @@ class ProductsController extends Controller
         $notes = \App\Models\SyncQueueState::forType('products')->fresh()->notes ?? '';
 
         if ($notes === 'nothing_changed' || str_starts_with($notes, 'fetched:0')) {
-            return back()->with('info', 'No new or updated products in ' . $this->settings->ecomDisplayName() . ' since last sync.');
+            return redirect()->route('dashboard.products')->with('info', 'No new or updated products in ' . $this->settings->ecomDisplayName() . ' since last sync.');
         }
 
         if (str_starts_with($notes, 'fetched:')) {
             preg_match('/fetched:(\d+)(?::skipped:(\d+))?/', $notes, $m);
             $fetched = $m[1] ?? '?';
             $skipped = isset($m[2]) ? " ({$m[2]} unchanged skipped)" : '';
-            return back()->with('success', "{$fetched} product(s) fetched{$skipped}. Click <strong>Push to " . $this->settings->erpDisplayName() . '</strong> to sync.');
+            return redirect()->route('dashboard.products')->with('success', "{$fetched} product(s) fetched{$skipped}. Click <strong>Push to " . $this->settings->erpDisplayName() . '</strong> to sync.');
         }
 
-        return back()->with('success', 'Products fetched from ' . $this->settings->ecomDisplayName() . '. Click Push to ' . $this->settings->erpDisplayName() . '.');
+        return redirect()->route('dashboard.products')->with('success', 'Products fetched from ' . $this->settings->ecomDisplayName() . '. Click Push to ' . $this->settings->erpDisplayName() . '.');
     }
 
     // ── Post all: direction-aware push ───────────────────────────────────────
@@ -123,12 +125,17 @@ class ProductsController extends Controller
             $pending = SyncMapping::where('entity_type', 'product')
                 ->whereIn('last_sync_direction', ['ecom_to_erp', 'shopify_to_erp', 'shopify_to_odoo'])
                 ->where(function ($q) {
-                    $q->whereNull('erp_id')->orWhere('erp_id', '0')->orWhere('erp_id', '');
+                    // New products not yet in ERP
+                    $q->whereNull('erp_id')
+                      ->orWhere('erp_id', '0')
+                      ->orWhere('erp_id', '')
+                      // Re-fetched products that need an update pushed to ERP
+                      ->orWhere('ecom_status', 'pending');
                 })
                 ->get();
 
             if ($pending->isEmpty()) {
-                return back()->with('info', 'No products pending push to ' . $this->settings->erpDisplayName() . '. Run "Fetch from ' . $this->settings->ecomDisplayName() . '" first.');
+                return redirect()->route('dashboard.products')->with('info', 'No products pending push to ' . $this->settings->erpDisplayName() . '. Run "Fetch from ' . $this->settings->ecomDisplayName() . '" first.');
             }
 
             $pushed = 0;
@@ -147,13 +154,21 @@ class ProductsController extends Controller
                     }
 
                     // Create product in Odoo directly — maps Shopify title/price/SKU
-                    $erp   = app(\App\Services\Erp\ErpInterface::class);
-                    $erpId = $erp->createProduct($ecomProduct);
+                    $erp           = app(\App\Services\Erp\ErpInterface::class);
+                    $alreadyInErp  = $mapping->erp_id && $mapping->erp_id !== '0';
+
+                    if ($alreadyInErp) {
+                        $erp->upsertProduct(array_merge($ecomProduct, ['id' => (int) $mapping->erp_id]));
+                        $erpId = $mapping->erp_id;
+                    } else {
+                        $erpId = $erp->createProduct($ecomProduct);
+                    }
 
                     if ($erpId) {
                         $mapping->update([
-                            'erp_id'         => (string) $erpId,
-                            'last_synced_at'  => now(),
+                            'erp_id'              => (string) $erpId,
+                            'ecom_status'         => 'posted',
+                            'last_synced_at'      => now(),
                             'last_sync_direction' => 'ecom_to_erp',
                         ]);
                     }
@@ -167,14 +182,14 @@ class ProductsController extends Controller
 
             $msg = "{$pushed} product(s) pushed to " . $this->settings->erpDisplayName() . ".";
             if ($failed) $msg .= " {$failed} failed — check logs.";
-            return back()->with($failed ? 'warning' : 'success', $msg);
+            return redirect()->route('dashboard.products')->with($failed ? 'warning' : 'success', $msg);
         }
 
         // ── ERP → Ecom (erp_to_ecom or bidirectional) ───────────────────
         $ecomJobClass = app(\App\Services\ConnectorRegistry::class)->job($ecomDriver, 'push_product');
 
         if (!$ecomJobClass) {
-            return back()->with('error', "No push job registered for ecom driver [{$ecomDriver}].");
+            return redirect()->route('dashboard.products')->with('error', "No push job registered for ecom driver [{$ecomDriver}].");
         }
 
         $amazonEnabled = $this->settings->isAmazonChannelEnabled();
@@ -189,7 +204,7 @@ class ProductsController extends Controller
             })->get();
 
         if ($records->isEmpty()) {
-            return back()->with('info', 'No products pending push. Fetch from ' . $this->settings->erpDisplayName() . ' first.');
+            return redirect()->route('dashboard.products')->with('info', 'No products pending push. Fetch from ' . $this->settings->erpDisplayName() . ' first.');
         }
 
         $queued  = 0;
@@ -214,24 +229,24 @@ class ProductsController extends Controller
         }
 
         if ($queued === 0) {
-            return back()->with('info', "All products already pushed and unchanged." . ($skipped > 0 ? " {$skipped} skipped." : ''));
+            return redirect()->route('dashboard.products')->with('info', "All products already pushed and unchanged." . ($skipped > 0 ? " {$skipped} skipped." : ''));
         }
 
         $skipNote = $skipped > 0 ? " ({$skipped} already up to date skipped)" : '';
-        return back()->with('success', "{$queued} product(s) queued to push to " . $this->settings->ecomDisplayName() . "{$skipNote}.");
+        return redirect()->route('dashboard.products')->with('success', "{$queued} product(s) queued to push to " . $this->settings->ecomDisplayName() . "{$skipNote}.");
     }
 
     // ── Show product detail ───────────────────────────────────────────────────
 
-    public function show(int $erpId)
+    public function show(string $id)
     {
         $syncMode = $this->settings->productSyncMode();
 
         if ($syncMode === 'ecom_to_erp') {
-            return $this->showEcomToErp($erpId);
+            return $this->showEcomToErp($id);
         }
 
-        return $this->showErpToEcom($erpId);
+        return $this->showErpToEcom((int) $id);
     }
 
     private function showErpToEcom(int $erpId)
@@ -241,7 +256,8 @@ class ProductsController extends Controller
             ->first();
 
         if (!$productCache || !$productCache->cacheExists()) {
-            return back()->with('error', "No cached data for product #{$erpId}.");
+            return redirect()->route('dashboard.products')
+                ->with('error', "No cached data for product #{$erpId}.");
         }
 
         $data = $productCache->readCache();
@@ -252,69 +268,115 @@ class ProductsController extends Controller
             ->latest()
             ->first();
 
-        $ecomPayload    = [];
-        $shopifyPayload = [];
-        try {
-            $shopifyService = app(\App\Services\Shopify\ShopifyProductService::class);
-            $ecomPayload    = $shopifyService->buildPayload(
-                $data['template']         ?? [],
-                $data['variants']         ?? [],
-                $data['attribute_values'] ?? [],
-            );
-            $shopifyPayload = $ecomPayload;
-        } catch (\Throwable $e) {
-            $ecomPayload    = ['_error' => $e->getMessage()];
-            $shopifyPayload = $ecomPayload;
+        // Only build the outgoing payload when the product has actually been
+        // pushed at least once. Before that the Shopify tab shows a placeholder.
+        $ecomPayload = null;
+        if ($syncLog) {
+            // Prefer the exact payload that was sent (stored on the log row).
+            // Fall back to rebuilding it live so the tab is never blank on old logs.
+            if ($syncLog->request_payload) {
+                $decoded     = json_decode($syncLog->request_payload, true);
+                $ecomPayload = $decoded ?? [];
+            }
+
+            if (empty($ecomPayload)) {
+                try {
+                    $shopifyService = app(\App\Services\Shopify\ShopifyProductService::class);
+                    $ecomPayload    = $shopifyService->buildPayload(
+                        $data['template']         ?? [],
+                        $data['variants']         ?? [],
+                        $data['attribute_values'] ?? [],
+                    );
+                } catch (\Throwable $e) {
+                    $ecomPayload = ['_error' => $e->getMessage()];
+                }
+            }
         }
 
-        $ecomResponse    = null;
-        $shopifyResponse = null;
+        $ecomResponse = null;
         if ($syncLog?->response_payload) {
-            $ecomResponse    = json_decode($syncLog->response_payload, true) ?? $syncLog->response_payload;
-            $shopifyResponse = $ecomResponse;
+            $ecomResponse = json_decode($syncLog->response_payload, true) ?? $syncLog->response_payload;
         }
 
         $odooId = $erpId;
+        $shopifyStore = $this->settings->shopifyShop();
+        $apiVersion  = $this->settings->shopifyVersion() ?: '2024-01';
 
+        $syncMode = 'erp_to_ecom';
         return view('dashboard.products-detail', compact(
-            'erpId', 'odooId', 'data', 'productCache', 'syncLog',
-            'ecomPayload', 'shopifyPayload', 'ecomResponse', 'shopifyResponse'
+            'syncMode', 'erpId', 'odooId', 'data', 'shopifyStore', 'apiVersion', 'productCache', 'syncLog',
+            'ecomPayload', 'ecomResponse'
         ));
     }
 
-    private function showEcomToErp(int $id)
+    private function showEcomToErp(string $id)
     {
-        // In ecom_to_erp mode the ID may be either ecom_id (Shopify) or erp_id (Odoo)
+        // ID may be ecom_id (Shopify) or erp_id (Odoo)
         $mapping = SyncMapping::where('entity_type', 'product')
             ->whereIn('last_sync_direction', ['ecom_to_erp', 'shopify_to_erp', 'shopify_to_odoo'])
             ->where(function ($q) use ($id) {
-                $q->where('ecom_id', (string) $id)
-                  ->orWhere('erp_id', (string) $id);
+                $q->where('ecom_id', $id)->orWhere('erp_id', $id);
             })
             ->first();
 
         if (!$mapping) {
-            return back()->with('error', "No product mapping found for ID #{$id}.");
+            return redirect()->route('dashboard.products')->with('error', "No product mapping found for ID #{$id}.");
         }
 
-        $syncLog = SyncLog::where('entity_type', 'product')
+        // ── Load cached JSON from storage (mirrors erp_to_ecom readCache) ──
+        $filePath  = 'ecom_products/' . $mapping->ecom_id . '.json';
+        $cacheData = null;
+
+        if (Storage::disk('local')->exists($filePath)) {
+            $raw       = Storage::disk('local')->get($filePath);
+            $cacheData = $raw ? json_decode($raw, true) : null;
+        }
+
+        // Fallback: rebuild from SyncMapping metadata if file missing
+        if (!$cacheData) {
+            $meta      = is_array($mapping->metadata) ? $mapping->metadata : json_decode($mapping->metadata ?? '{}', true);
+            $cacheData = [
+                'fetched_at'  => $mapping->last_synced_at?->toISOString(),
+                'ecom_id'     => $mapping->ecom_id,
+                'ecom_driver' => $mapping->ecom_driver ?? $this->settings->ecomDriver(),
+                'product'     => $meta,
+            ];
+        }
+
+        // ── Push log only (create/update) — fetch logs are NOT a push ──
+        $pushLog = SyncLog::where('entity_type', 'product')
             ->where('entity_id', $mapping->ecom_id)
-            ->where('direction', 'ecom_to_erp')
+            ->whereIn('direction', ['ecom_to_erp', 'shopify_to_erp', 'shopify_to_odoo'])
+            ->whereIn('action', ['create', 'update'])
             ->latest()
             ->first();
 
-        // Reuse products-detail view with ecom_to_erp data shape
+        // What was sent TO the ERP and what ERP returned (only present after an actual push)
+        $erpPayload = null;
+        if ($pushLog?->request_payload) {
+            $erpPayload = json_decode($pushLog->request_payload, true) ?? [];
+        }
+
+        $erpResponse = $pushLog?->response_payload
+            ? (json_decode($pushLog->response_payload, true) ?? $pushLog->response_payload)
+            : null;
+
+        $shopifyStore = $this->settings->shopifyShop() ?: config('shopify.shop', '—');
+        $apiVersion   = $this->settings->shopifyVersion() ?: '2024-01';
+
         return view('dashboard.products-detail', [
-            'erpId'          => $mapping->erp_id,
-            'odooId'         => $mapping->erp_id,
-            'data'           => ['ecom_id' => $mapping->ecom_id, 'ecom_handle' => $mapping->ecom_handle],
-            'productCache'   => null,
-            'syncLog'        => $syncLog,
-            'ecomPayload'    => [],
-            'shopifyPayload' => [],
-            'ecomResponse'   => $syncLog?->response_payload ? json_decode($syncLog->response_payload, true) : null,
-            'shopifyResponse'=> $syncLog?->response_payload ? json_decode($syncLog->response_payload, true) : null,
-            'mapping'        => $mapping,
+            'syncMode'     => 'ecom_to_erp',
+            'erpId'        => $mapping->erp_id ?: null,
+            'odooId'       => $mapping->erp_id ?: null,
+            'ecomId'       => $mapping->ecom_id,
+            'data'         => $cacheData,
+            'productCache' => null,
+            'syncLog'      => $pushLog,      // null until actually pushed to ERP
+            'ecomPayload'  => $erpPayload,   // payload sent to ERP
+            'ecomResponse' => $erpResponse,  // ERP response
+            'mapping'      => $mapping,
+            'shopifyStore' => $shopifyStore,
+            'apiVersion'   => $apiVersion,
         ]);
     }
 
@@ -334,12 +396,12 @@ class ProductsController extends Controller
             $wasSkipped = $before && $after && \Carbon\Carbon::parse($before)->eq(\Carbon\Carbon::parse($after));
 
             if ($wasSkipped) {
-                return back()->with('info', "Product #{$erpId} is up to date — no changes in " . $this->settings->erpDisplayName() . ".");
+                return redirect()->route('dashboard.products.show', $erpId)->with('info', "Product #{$erpId} is up to date — no changes in " . $this->settings->erpDisplayName() . ".");
             }
 
-            return back()->with('success', "Product #{$erpId} fetched from " . $this->settings->erpDisplayName() . '.');
+            return redirect()->route('dashboard.products.show', $erpId)->with('success', "Product #{$erpId} fetched from " . $this->settings->erpDisplayName() . '.');
         } catch (\Throwable $e) {
-            return back()->with('error', 'Fetch failed: ' . $e->getMessage());
+            return redirect()->route('dashboard.products.show', $erpId)->with('error', 'Fetch failed: ' . $e->getMessage());
         }
     }
 
@@ -349,7 +411,7 @@ class ProductsController extends Controller
         $ecomJobClass = app(\App\Services\ConnectorRegistry::class)->job($ecomDriver, 'push_product');
 
         if (!$ecomJobClass) {
-            return back()->with('error', "No push job registered for driver [{$ecomDriver}].");
+            return redirect()->route('dashboard.products.show', $erpId)->with('error', "No push job registered for driver [{$ecomDriver}].");
         }
 
         // Skip if already sent and ERP write_date hasn't changed since last push
@@ -365,7 +427,7 @@ class ProductsController extends Controller
                 $fetchedAt    = \Carbon\Carbon::parse($cache->fetched_at);
 
                 if (!$erpWrittenAt->isAfter($fetchedAt)) {
-                    return back()->with('info',
+                    return redirect()->route('dashboard.products.show', $erpId)->with('info',
                         "Product #{$erpId} already pushed and unchanged — skipped."
                     );
                 }
@@ -374,7 +436,7 @@ class ProductsController extends Controller
 
         $ecomJobClass::dispatchSync($erpId);
 
-        return back()->with('success',
+        return redirect()->route('dashboard.products.show', $erpId)->with('success',
             "Product #{$erpId} pushed to " . $this->settings->ecomDisplayName() . '.'
         );
     }
@@ -396,6 +458,10 @@ class ProductsController extends Controller
 
         if (in_array($status, ['sent', 'failed', 'pending'])) {
             $query->ecomStatus($status);
+        } elseif ($status === 'updated') {
+            // pending records where updated_at > fetched_at (re-fetched/edited after initial sync)
+            $query->where('ecom_status', ProductCache::STATUS_PENDING)
+                  ->whereColumn('updated_at', '>', 'fetched_at');
         }
 
         return $query->paginate($perPage)->withQueryString();
@@ -416,8 +482,11 @@ class ProductsController extends Controller
         }
 
         $query->leftJoin('product_cache', function ($join) {
-            $join->on('product_cache.erp_id', '=', 'sync_mappings.erp_id')
-                 ->orOn('product_cache.odoo_id', '=', DB::raw('CAST(sync_mappings.erp_id AS UNSIGNED)'));
+            // Ecom → ERP cache rows are keyed by ecom_product_id (the fetch job
+            // never sets erp_id on them), so join on the ecom id — the stable
+            // shared key in this direction. Joining on erp_id silently misses
+            // and the view falls back to the handle, showing a stale name.
+            $join->on('product_cache.ecom_product_id', '=', 'sync_mappings.ecom_id');
         })->select([
             'sync_mappings.*',
             'product_cache.name as product_name',
@@ -465,7 +534,15 @@ class ProductsController extends Controller
             'total'   => ProductCache::count(),
             'sent'    => ProductCache::countEcomStatus('sent'),
             'failed'  => ProductCache::countEcomStatus('failed'),
-            'pending' => ProductCache::countEcomStatus('pending'),
+            'updated' => ProductCache::where('ecom_status', ProductCache::STATUS_PENDING)
+                             ->whereColumn('updated_at', '>', 'fetched_at')
+                             ->count(),
+            'pending' => ProductCache::where('ecom_status', ProductCache::STATUS_PENDING)
+                             ->where(function ($q) {
+                                 $q->whereNull('fetched_at')
+                                   ->orWhereColumn('updated_at', '<=', 'fetched_at');
+                             })
+                             ->count(),
         ];
     }
 
@@ -530,7 +607,7 @@ class ProductsController extends Controller
             $product = $ecom->getProduct($ecomId);
 
             if (empty($product)) {
-                return back()->with('error', "Product #{$ecomId} not found in " . $this->settings->ecomDisplayName() . '.');
+                return redirect()->route('dashboard.products')->with('error', "Product #{$ecomId} not found in " . $this->settings->ecomDisplayName() . '.');
             }
 
             $updatedAt = $product['updated_at'] ?? null;
@@ -543,14 +620,38 @@ class ProductsController extends Controller
             if ($existing) {
                 // Already in Odoo — skip entirely, don't reset to pending
                 if ($existing->erp_id && $existing->erp_id !== '0') {
-                    return back()->with('info', "Product #{$ecomId} already synced to " . $this->settings->erpDisplayName() . " — no action needed.");
+                    return redirect()->route('dashboard.products')->with('info', "Product #{$ecomId} already synced to " . $this->settings->erpDisplayName() . " — no action needed.");
                 }
                 $prevMeta      = is_array($existing->metadata) ? $existing->metadata : json_decode($existing->metadata ?? '{}', true);
                 $prevUpdatedAt = $prevMeta['updated_at'] ?? null;
                 if ($prevUpdatedAt && $updatedAt && $prevUpdatedAt === $updatedAt && $existing->ecom_status === 'pending') {
-                    return back()->with('info', "Product #{$ecomId} already fetched and pending push.");
+                    return redirect()->route('dashboard.products')->with('info', "Product #{$ecomId} already fetched and pending push.");
                 }
             }
+
+            // ── Save full product JSON to storage (mirrors erp_to_ecom cache) ──
+            $cacheData = [
+                'fetched_at'  => now()->toISOString(),
+                'ecom_id'     => (string) $ecomId,
+                'ecom_driver' => $this->settings->ecomDriver(),
+                'product'     => $product,
+            ];
+            $filePath = 'ecom_products/' . $ecomId . '.json';
+            Storage::disk('local')->put($filePath, json_encode($cacheData, JSON_PRETTY_PRINT));
+
+            // ── ProductCache row so info page can read the file ──
+            ProductCache::updateOrCreate(
+                ['ecom_product_id' => (string) $ecomId],
+                [
+                    'name'           => $product['title'] ?? $product['name'] ?? null,
+                    'default_code'   => $product['variants'][0]['sku'] ?? null,
+                    'ecom_status'    => ProductCache::STATUS_PENDING,
+                    'shopify_status' => ProductCache::STATUS_PENDING,
+                    'file_path'      => $filePath,
+                    'raw_data'       => $cacheData,
+                    'fetched_at'     => now(),
+                ]
+            );
 
             SyncMapping::updateOrCreate(
                 ['entity_type' => 'product', 'ecom_id' => (string) $ecomId, 'ecom_driver' => $this->settings->ecomDriver()],
@@ -563,9 +664,20 @@ class ProductsController extends Controller
                 ]
             );
 
-            return back()->with('success', "Product #{$ecomId} fetched. Click Push to " . $this->settings->erpDisplayName() . ' to create it.');
+            // ── SyncLog (fetch record) so info page has a log entry immediately ──
+            SyncLog::create([
+                'direction'       => SyncLog::DIRECTION_ECOM_TO_ERP,
+                'entity_type'     => 'product',
+                'entity_id'       => (string) $ecomId,
+                'action'          => 'fetch',
+                'status'          => SyncLog::STATUS_SUCCESS,
+                'request_payload' => json_encode($product),
+                'synced_at'       => now(),
+            ]);
+
+            return redirect()->route('dashboard.products')->with('success', "Product #{$ecomId} fetched. Click Push to " . $this->settings->erpDisplayName() . ' to create it.');
         } catch (\Throwable $e) {
-            return back()->with('error', 'Fetch failed: ' . $e->getMessage());
+            return redirect()->route('dashboard.products')->with('error', 'Fetch failed: ' . $e->getMessage());
         }
     }
 
@@ -579,40 +691,35 @@ class ProductsController extends Controller
                 ->first();
 
             if (!$mapping) {
-                return back()->with('error', "No data for product #{$ecomId}. Run Fetch first.");
+                return redirect()->route('dashboard.products')->with('error', "No data for product #{$ecomId}. Run Fetch first.");
             }
 
             // Already in ERP — block re-push entirely
             if ($mapping->erp_id && $mapping->erp_id !== '0') {
-                return back()->with('info', "Product #{$ecomId} already in " . $this->settings->erpDisplayName() . " (ID: #{$mapping->erp_id}).");
+                $ecomProduct = is_array($mapping->metadata) ? $mapping->metadata : json_decode($mapping->metadata, true);
+                $erp         = app(\App\Services\Erp\ErpInterface::class);
+
+                $log = SyncLog::create([
+                    'direction'       => SyncLog::DIRECTION_ECOM_TO_ERP,
+                    'entity_type'     => 'product',
+                    'entity_id'       => (string) $ecomId,
+                    'action'          => 'update',
+                    'status'          => SyncLog::STATUS_PROCESSING,
+                    'request_payload' => json_encode($ecomProduct),
+                ]);
+
+                $erp->upsertProduct(array_merge($ecomProduct, ['id' => (int) $mapping->erp_id]));
+                $mapping->update(['ecom_status' => 'posted', 'last_synced_at' => now()]);
+                $log->markSuccess(json_encode(['erp_id' => $mapping->erp_id]));
+
+                return redirect()->route('dashboard.products')->with('success',
+                    "Product #{$ecomId} updated in " . $this->settings->erpDisplayName() . " (ID: #{$mapping->erp_id})."
+                );
             }
-
-            $ecomProduct = is_array($mapping->metadata) ? $mapping->metadata : json_decode($mapping->metadata, true);
-            $erp         = app(\App\Services\Erp\ErpInterface::class);
-
-            $log = \App\Models\SyncLog::create([
-                'direction'       => \App\Models\SyncLog::DIRECTION_ECOM_TO_ERP,
-                'entity_type'     => 'product',
-                'entity_id'       => (string) $ecomId,
-                'action'          => 'create',
-                'status'          => \App\Models\SyncLog::STATUS_PROCESSING,
-                'request_payload' => json_encode($ecomProduct),
-            ]);
-
-            $erpId = $erp->createProduct($ecomProduct);
-
-            if ($erpId) {
-                $mapping->update(['erp_id' => (string) $erpId, 'ecom_status' => 'posted', 'last_synced_at' => now(), 'last_sync_direction' => 'ecom_to_erp']);
-                $log->markSuccess(json_encode(['erp_id' => $erpId]));
-            } else {
-                $log->markFailed('ERP createProduct returned no ID');
-            }
-
-            return back()->with('success', "Product #{$ecomId} pushed to " . $this->settings->erpDisplayName() . " (ID: #{$erpId}).");
         } catch (\Throwable $e) {
             if (isset($log)) $log->markFailed($e->getMessage());
-            return back()->with('error', 'Push failed: ' . $e->getMessage());
+            return redirect()->route('dashboard.products')->with('error', 'Push failed: ' . $e->getMessage());
         }
     }
-	
+
 }

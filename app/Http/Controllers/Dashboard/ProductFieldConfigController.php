@@ -62,10 +62,13 @@ class ProductFieldConfigController extends Controller
         $erpFields     = $this->loadErpFields($entityType);
         $ecomFetchedAt = $this->fieldsFetchedAt($this->ecomFieldsFile($entityType));
         $erpFetchedAt  = $this->fieldsFetchedAt($this->erpFieldsFile($entityType));
+		
+		$mode       = $this->settings->productSyncMode(); 
+		$targetSide = $mode === 'ecom_to_erp' ? 'erp' : 'ecom';
 
         return view('dashboard.product-field-config.index', compact(
             'entity', 'entities', 'entityType',
-            'configs', 'ecomFields', 'erpFields',
+            'configs', 'ecomFields', 'erpFields','targetSide',
             'ecomFetchedAt', 'erpFetchedAt',
             'ecomDriver', 'erpDriver'
         ));
@@ -77,6 +80,7 @@ class ProductFieldConfigController extends Controller
     {
         $data = $request->validate([
             'entity_type'         => 'nullable|string|max:50',
+            'direction'           => 'nullable|in:erp_to_ecom,ecom_to_erp',
             'ecom_field'          => 'required|string|max:100',
             'ecom_field_label'    => 'nullable|string|max:255',
             'erp_field'           => 'nullable|string|max:100',
@@ -96,6 +100,7 @@ class ProductFieldConfigController extends Controller
         ]);
 
         $data['entity_type'] = $data['entity_type'] ?? 'product';
+        $data['direction']   = $data['direction'] ?? 'erp_to_ecom';
         $data['ecom_driver'] = $this->settings->ecomDriver();
         $data['erp_driver']  = $this->settings->erpDriver();
         $data['is_active']   = $request->boolean('is_active', true);
@@ -117,6 +122,7 @@ class ProductFieldConfigController extends Controller
     {
         $data = $request->validate([
             'entity_type'         => 'nullable|string|max:50',
+            'direction'           => 'nullable|in:erp_to_ecom,ecom_to_erp',
             'ecom_field'          => 'required|string|max:100',
             'ecom_field_label'    => 'nullable|string|max:255',
             'erp_field'           => 'nullable|string|max:100',

@@ -9,7 +9,7 @@ interface EcomInterface
     // ── Products ──────────────────────────────────────────────────────────
 
     public function getProducts(array $filters = []): array;
-    public function getProduct(string|int $id): array;
+    public function getProduct(string|int $id): ?array;
     public function createProduct(array $payload): array;
     public function updateProduct(string|int $id, array $payload): array;
     public function deleteProduct(string|int $id): void;
@@ -29,6 +29,8 @@ interface EcomInterface
     public function createOrder(array $orderData): array;
     public function updateOrder(string|int $id, array $updates): void;
     public function cancelOrder(string|int $id, ?string $reason = null): void;
+	
+
 
     // ── Inventory ─────────────────────────────────────────────────────────
 
@@ -66,4 +68,5 @@ interface EcomInterface
      * @return array<int, array{key:string,label:string,scope:string}>
      */
     public function getAvailableFields(string $entityType): array;
+	public function getMappingOptions(string $type, ?string $search = null): array;
 }

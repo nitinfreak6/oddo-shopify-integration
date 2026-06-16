@@ -68,7 +68,7 @@ class UniversalSyncService
             throw new \RuntimeException("Entity [{$entityType}] is not active.");
         }
 
-        $fieldConfigs = $this->getFieldConfigs($entityType, $scope);
+        $fieldConfigs = $this->getFieldConfigs($entityType, $scope, 'erp_to_ecom');
 
         if ($fieldConfigs->isEmpty()) {
             Log::warning("UniversalSyncService: No field configs for {$entityType}, scope={$scope}");
@@ -164,7 +164,19 @@ class UniversalSyncService
             throw new \RuntimeException("Entity [{$entityType}] is not active.");
         }
 
-        $erpPayload = $this->buildErpPayloadFull($entityType, $ecomData, $scope ?? 'header');
+        // Products use template/variant scoped configs and reverse_transform —
+        // build them through the same config-driven mapper the manual push uses,
+        // so create AND update stay consistent. buildErpPayloadFull is for
+        // header/line entities (orders, customers).
+        if ($entityType === 'product') {
+            $erpPayload = app(\App\Services\FieldMappingService::class)->buildErpProductPayload(
+                $ecomData,
+                $this->ecom->driverName(),
+                $this->erp->driverName()
+            );
+        } else {
+            $erpPayload = $this->buildErpPayloadFull($entityType, $ecomData, $scope ?? 'header');
+        }
         $ecomId     = (string) ($ecomData['id'] ?? '');
 
         $mapping = SyncMapping::where('entity_type', $entityType)
@@ -229,7 +241,7 @@ class UniversalSyncService
     // instead of hardcoding field names in adapters.
     public function getErpFieldsToFetch(string $entityType, ?string $scope = null): array
     {
-        $configs = $this->getFieldConfigs($entityType, $scope);
+        $configs = $this->getFieldConfigs($entityType, $scope, 'erp_to_ecom');
 
         $fields = $configs
             ->flatMap(fn($c) => array_filter([
@@ -251,13 +263,13 @@ class UniversalSyncService
 
     // ── Field config loader ───────────────────────────────────────────────
 
-    private function getFieldConfigs(string $entityType, ?string $scope): \Illuminate\Support\Collection
+    private function getFieldConfigs(string $entityType, ?string $scope, ?string $direction = null): \Illuminate\Support\Collection
     {
         $ecomDriver = $this->ecom->driverName();
         $erpDriver  = $this->erp->driverName();
-        $cacheKey   = "field_configs_{$entityType}_{$ecomDriver}_{$erpDriver}_{$scope}";
+        $cacheKey   = "field_configs_{$entityType}_{$ecomDriver}_{$erpDriver}_{$scope}_{$direction}";
 
-        return Cache::remember($cacheKey, 300, function () use ($entityType, $scope, $ecomDriver, $erpDriver) {
+        return Cache::remember($cacheKey, 300, function () use ($entityType, $scope, $ecomDriver, $erpDriver, $direction) {
             $query = ProductFieldConfig::where('entity_type', $entityType)
                 ->where('ecom_driver', $ecomDriver)
                 ->where('erp_driver', $erpDriver)
@@ -266,6 +278,18 @@ class UniversalSyncService
 
             if ($scope) {
                 $query->where('scope', $scope);
+            }
+
+            // Direction separation (mirrors the product reader):
+            //   'erp_to_ecom' → existing rows (NULL or 'erp_to_ecom'); never the
+            //                   new ecom→erp set, so erp→ecom is unaffected.
+            //   'ecom_to_erp' → strictly the ecom→erp set.
+            if ($direction === 'erp_to_ecom') {
+                $query->where(function ($q) {
+                    $q->whereNull('direction')->orWhere('direction', '!=', 'ecom_to_erp');
+                });
+            } elseif ($direction === 'ecom_to_erp') {
+                $query->where('direction', 'ecom_to_erp');
             }
 
             return $query->get();
@@ -324,8 +348,8 @@ class UniversalSyncService
      */
     private function buildErpPayloadFull(string $entityType, array $ecomData, string $scope): array
 {
-    $headerConfigs    = $this->getFieldConfigs($entityType, 'header');
-    $lineConfigs      = $this->getFieldConfigs($entityType, 'line');
+    $headerConfigs    = $this->getFieldConfigs($entityType, 'header', 'ecom_to_erp');
+    $lineConfigs      = $this->getFieldConfigs($entityType, 'line', 'ecom_to_erp');
 
     $lineItemsKey = null;
     $erpLineField = 'order_line';
@@ -491,6 +515,9 @@ class UniversalSyncService
     {
         match ($entityType) {
             'customer' => $this->erp->updateCustomer($erpId, $payload),
+            // Products were previously a no-op here — updates silently did nothing
+            // in Odoo. Route through upsertProduct with the id so write() runs.
+            'product'  => $this->erp->upsertProduct(array_merge($payload, ['id' => $erpId])),
             default    => null,
         };
 

@@ -88,6 +88,7 @@
             ['label' => 'Total Products', 'value' => $displayStats['total'] ?? 0, 'color' => 'text-gray-700', 'bg' => 'bg-white'],
             ['label' => 'Sent', 'value' => $displayStats['sent'] ?? 0, 'color' => 'text-emerald-600', 'bg' => 'bg-emerald-50'],
             ['label' => 'Failed', 'value' => $displayStats['failed'] ?? 0, 'color' => 'text-red-600', 'bg' => 'bg-red-50'],
+           
             ['label' => 'Pending', 'value' => $displayStats['pending'] ?? 0, 'color' => 'text-amber-600', 'bg' => 'bg-amber-50'],
         ];
         @endphp
@@ -131,6 +132,7 @@
                 <option value="all" {{ $status === 'all' ? 'selected' : '' }}>All Statuses</option>
                 @if($syncMode === 'erp_to_ecom' || ($syncMode === 'bidirectional' && ($direction ?? 'erp_to_ecom') === 'erp_to_ecom'))
                     <option value="pending" {{ $status === 'pending' ? 'selected' : '' }}>Pending</option>
+                    <option value="updated" {{ $status === 'updated' ? 'selected' : '' }}>Updated</option>
                     <option value="sent" {{ $status === 'sent' ? 'selected' : '' }}>Sent</option>
                     <option value="failed" {{ $status === 'failed' ? 'selected' : '' }}>Failed</option>
                 @else
@@ -272,12 +274,20 @@
                             @endif
                         </td>
                         <td class="px-4 py-3">
+                            @php
+                                $isUpdatedPending = $product->ecom_status === 'pending'
+                                    && $product->updated_at
+                                    && $product->fetched_at
+                                  ;
+                            @endphp
                             @if($product->ecom_status === 'sent')
                                 <span class="px-2 py-1 bg-emerald-100 text-emerald-700 rounded-md text-xs font-medium">✓ Sent</span>
                             @elseif($product->ecom_status === 'failed')
                                 <span class="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium">✗ Failed</span>
+                            @elseif($isUpdatedPending)
+                                <span class="px-2 py-1 bg-blue-100 text-blue-700 rounded-md text-xs font-medium">✎ Updated</span>
                             @else
-                                <span class="px-2 py-1 bg-gray-100 text-gray-600 rounded-md text-xs font-medium">⏳ Pending</span>
+                                <span class="px-2 py-1 bg-amber-100 text-amber-700 rounded-md text-xs font-medium">⏳ Pending</span>
                             @endif
                         </td>
                         <td class="px-4 py-3 text-gray-500 text-xs">
