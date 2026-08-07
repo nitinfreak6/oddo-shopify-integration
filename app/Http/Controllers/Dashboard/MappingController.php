@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Dashboard;
 
 use App\Http\Controllers\Controller;
 use App\Models\ChannelMapping;
+use App\Services\SettingsService;
 use Illuminate\Http\Request;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\View\View;
@@ -12,7 +13,7 @@ class MappingController extends Controller
 {
     private array $validTypes;
 
-    public function __construct()
+    public function __construct(private readonly SettingsService $settings)
     {
         $this->validTypes = array_keys(ChannelMapping::typeLabels());
     }
@@ -23,6 +24,7 @@ class MappingController extends Controller
     public function index(Request $request, string $type): View
     {
         abort_unless(in_array($type, $this->validTypes), 404);
+        $this->assertMappingTypeEnabled($type);
 
         $channel  = $request->query('channel', 'shopify');
         $search   = $request->query('search');
@@ -55,6 +57,7 @@ class MappingController extends Controller
     public function store(Request $request, string $type): RedirectResponse
     {
         abort_unless(in_array($type, $this->validTypes), 404);
+        $this->assertMappingTypeEnabled($type);
 
         $data = $request->validate([
             'channel'              => 'required|in:shopify,amazon,both',
@@ -96,6 +99,7 @@ class MappingController extends Controller
     public function update(Request $request, string $type, ChannelMapping $mapping): RedirectResponse
     {
         abort_unless($mapping->type === $type, 404);
+        $this->assertMappingTypeEnabled($type);
 
         $data = $request->validate([
             'channel'              => 'required|in:shopify,amazon,both',
@@ -136,6 +140,7 @@ class MappingController extends Controller
     public function destroy(string $type, ChannelMapping $mapping): RedirectResponse
     {
         abort_unless($mapping->type === $type, 404);
+        $this->assertMappingTypeEnabled($type);
         $mapping->delete();
 
         return back()->with('success', 'Mapping deleted.');
@@ -147,6 +152,7 @@ class MappingController extends Controller
     public function toggle(string $type, ChannelMapping $mapping): RedirectResponse
     {
         abort_unless($mapping->type === $type, 404);
+        $this->assertMappingTypeEnabled($type);
         $mapping->update(['is_active' => !$mapping->is_active]);
 
         return back()->with('success', $mapping->is_active ? 'Mapping enabled.' : 'Mapping disabled.');
@@ -158,6 +164,7 @@ class MappingController extends Controller
     public function import(Request $request, string $type): RedirectResponse
     {
         abort_unless(in_array($type, $this->validTypes), 404);
+        $this->assertMappingTypeEnabled($type);
 
         $request->validate(['json_data' => 'required|string']);
 
@@ -229,6 +236,7 @@ class MappingController extends Controller
     public function fetchErpFields(Request $request, string $type): \Illuminate\Http\JsonResponse
     {
         abort_unless(in_array($type, $this->validTypes), 404);
+        $this->assertMappingTypeEnabled($type);
 
         $model = $this->odooModelForType($type);
         if (!$model) {
@@ -260,9 +268,15 @@ class MappingController extends Controller
     public function fetchEcomFields(Request $request, string $type): \Illuminate\Http\JsonResponse
 	{
 		abort_unless(in_array($type, $this->validTypes), 404);
+		$this->assertMappingTypeEnabled($type);
 		$fields = app(\App\Services\Ecom\EcomInterface::class)
 					->getMappingOptions($type, $request->query('q'));
 		return response()->json(['fields' => $fields, 'type' => $type]);
 	}
+
+    private function assertMappingTypeEnabled(string $type): void
+    {
+        abort_unless($this->settings->isMappingTypeEnabled($type), 403);
+    }
 
 }

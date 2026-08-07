@@ -5,12 +5,14 @@ namespace App\Http\Controllers\Dashboard;
 use App\Http\Controllers\Controller;
 use App\Models\EntityDefinition;
 use App\Models\ProductFieldConfig;
+use App\Services\Config\FieldTransformRegistry;
 use App\Services\Ecom\EcomInterface;
 use App\Services\Erp\ErpInterface;
 use App\Services\SettingsService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class ProductFieldConfigController extends Controller
 {
@@ -34,15 +36,22 @@ class ProductFieldConfigController extends Controller
 
     public function index(Request $request)
     {
-        // Active entity type — defaults to 'product' so existing bookmarks work
         $entityType = $request->query('entity', 'product');
 
-        // All active entities for the tab bar — driven from entity_definitions
         $entities = EntityDefinition::where('is_active', true)
             ->orderBy('sort_order')
-            ->get();
+            ->get()
+            ->filter(fn ($entity) => $this->settings->isEntitySyncEnabled($entity->entity_type))
+            ->values();
 
-        // Current entity definition (for scopes etc.)
+        if ($entities->isEmpty()) {
+            abort(403, 'No sync entities are enabled in Global Settings.');
+        }
+
+        if (!$this->settings->isEntitySyncEnabled($entityType)) {
+            $entityType = $entities->first()->entity_type;
+        }
+
         $entity = $entities->firstWhere('entity_type', $entityType)
             ?? $entities->first();
 
@@ -53,24 +62,29 @@ class ProductFieldConfigController extends Controller
         $configs = ProductFieldConfig::where('entity_type', $entityType)
             ->where('ecom_driver', $ecomDriver)
             ->where('erp_driver', $erpDriver)
-            ->orderBy('sort_order')
-            ->orderBy('id')
+            ->ordered()
             ->paginate(50)
             ->withQueryString();
 
         $ecomFields    = $this->loadEcomFields($entityType);
         $erpFields     = $this->loadErpFields($entityType);
-        $ecomFetchedAt = $this->fieldsFetchedAt($this->ecomFieldsFile($entityType));
-        $erpFetchedAt  = $this->fieldsFetchedAt($this->erpFieldsFile($entityType));
 		
-		$mode       = $this->settings->productSyncMode(); 
+		$mode       = $this->settings->syncModeForEntity($entityType);
 		$targetSide = $mode === 'ecom_to_erp' ? 'erp' : 'ecom';
+		$defaultDirection = match ($entityType) {
+		    'dispatch' => $this->settings->salesOrderSyncMode() === 'ecom_to_erp'
+		        ? 'ecom_to_erp'
+		        : 'erp_to_ecom',
+		    default    => $mode === 'ecom_to_erp' ? 'ecom_to_erp' : 'erp_to_ecom',
+		};
+
+        $transformOptions = FieldTransformRegistry::all();
 
         return view('dashboard.product-field-config.index', compact(
             'entity', 'entities', 'entityType',
             'configs', 'ecomFields', 'erpFields','targetSide',
-            'ecomFetchedAt', 'erpFetchedAt',
-            'ecomDriver', 'erpDriver'
+            'ecomDriver', 'erpDriver', 'defaultDirection',
+            'transformOptions'
         ));
     }
 
@@ -78,35 +92,23 @@ class ProductFieldConfigController extends Controller
 
     public function store(Request $request)
     {
-        $data = $request->validate([
-            'entity_type'         => 'nullable|string|max:50',
-            'direction'           => 'nullable|in:erp_to_ecom,ecom_to_erp',
-            'ecom_field'          => 'required|string|max:100',
-            'ecom_field_label'    => 'nullable|string|max:255',
-            'erp_field'           => 'nullable|string|max:100',
-            'erp_field_label'     => 'nullable|string|max:255',
-            'erp_field_2'         => 'nullable|string|max:100',
-            'erp_field_2_label'   => 'nullable|string|max:255',
-            'field_type'          => 'required|in:default,custom,combine',
-            'combine_separator'   => 'nullable|string|max:20',
-            'scope'               => 'required|string|max:50',
-            'default_value'       => 'nullable|string|max:500',
-            'transform'           => 'nullable|string|max:50',
-            'min_length'          => 'nullable|integer|min:0',
-            'max_length'          => 'nullable|integer|min:0',
-            'is_active'           => 'boolean',
-			'is_readonly'         => 'boolean',
-            'sort_order'          => 'nullable|integer',
-        ]);
+        $data = $this->validateFieldConfigRequest($request);
 
-        $data['entity_type'] = $data['entity_type'] ?? 'product';
-        $data['direction']   = $data['direction'] ?? 'erp_to_ecom';
+        $entityType = $data['entity_type'] ?? 'product';
+        $data['entity_type'] = $entityType;
+        $data['direction']   = $data['direction']
+            ?? match ($entityType) {
+                'dispatch' => $this->settings->salesOrderSyncMode() === 'ecom_to_erp'
+                    ? 'ecom_to_erp'
+                    : 'erp_to_ecom',
+                default    => $this->settings->syncModeForEntity($entityType) === 'ecom_to_erp'
+                    ? 'ecom_to_erp'
+                    : 'erp_to_ecom',
+            };
         $data['ecom_driver'] = $this->settings->ecomDriver();
         $data['erp_driver']  = $this->settings->erpDriver();
         $data['is_active']   = $request->boolean('is_active', true);
-        $data['is_readonly'] = $request->boolean('is_readonly', false);
-		
-        $data['sort_order']  = $data['sort_order'] ?? 0;
+        $data['sort_order']  = $this->normalizeSortOrder($data['sort_order'] ?? null);
 
         ProductFieldConfig::create($data);
 
@@ -120,29 +122,10 @@ class ProductFieldConfigController extends Controller
 
     public function update(Request $request, ProductFieldConfig $config)
     {
-        $data = $request->validate([
-            'entity_type'         => 'nullable|string|max:50',
-            'direction'           => 'nullable|in:erp_to_ecom,ecom_to_erp',
-            'ecom_field'          => 'required|string|max:100',
-            'ecom_field_label'    => 'nullable|string|max:255',
-            'erp_field'           => 'nullable|string|max:100',
-            'erp_field_label'     => 'nullable|string|max:255',
-            'erp_field_2'         => 'nullable|string|max:100',
-            'erp_field_2_label'   => 'nullable|string|max:255',
-            'field_type'          => 'required|in:default,custom,combine',
-            'combine_separator'   => 'nullable|string|max:20',
-            'scope'               => 'required|string|max:50',
-            'default_value'       => 'nullable|string|max:500',
-            'transform'           => 'nullable|string|max:50',
-            'min_length'          => 'nullable|integer|min:0',
-            'max_length'          => 'nullable|integer|min:0',
-            'is_active'           => 'boolean',
-			'is_readonly'         => 'boolean',
-            'sort_order'          => 'nullable|integer',
-        ]);
+        $data = $this->validateFieldConfigRequest($request);
 
-        $data['is_active'] = $request->boolean('is_active', true);
-        $data['is_readonly'] = $request->boolean('is_readonly', false);
+        $data['is_active']   = $request->boolean('is_active', true);
+        $data['sort_order']  = $this->normalizeSortOrder($data['sort_order'] ?? $config->sort_order);
 
         $config->update($data);
 
@@ -178,27 +161,28 @@ class ProductFieldConfigController extends Controller
 
     public function fetchEcomFields(Request $request)
     {
-        $entityType = $request->query('entity', 'product');
+        $entityType = $this->resolveEntityTypeFromRequest($request);
         $ecomDriver = $this->settings->ecomDriver();
 
         try {
-            app(EcomInterface::class)->getProducts(['limit' => 1]);
+            $all = app(EcomInterface::class)->getAvailableFields($entityType);
+            if ($all === []) {
+                return redirect()
+                    ->route('dashboard.product-field-config.index', ['entity' => $entityType])
+                    ->with('error', $this->ecomFieldsFetchHint($entityType));
+            }
+
+            $entityFields = [
+                'template_fields' => array_values(array_filter($all, fn ($f) => ($f['scope'] ?? '') === 'template')),
+                'variant_fields'  => array_values(array_filter($all, fn ($f) => ($f['scope'] ?? '') === 'variant')),
+                'fields'          => array_values(array_filter($all, fn ($f) => !in_array($f['scope'] ?? '', ['template', 'variant'], true))),
+            ];
         } catch (\Throwable $e) {
             Log::error("fetchEcomFields [{$ecomDriver}][{$entityType}]: " . $e->getMessage());
             return redirect()
                 ->route('dashboard.product-field-config.index', ['entity' => $entityType])
                 ->with('error', "Could not connect to {$this->settings->ecomDisplayName()}: " . $e->getMessage());
         }
-
-        // Driver-neutral field discovery — the active ecom adapter reports its
-        // own fields via EcomInterface::getAvailableFields(), grouped by scope
-        // so the persisted JSON shape (template/variant/fields) is unchanged.
-        $all          = app(EcomInterface::class)->getAvailableFields($entityType);
-        $entityFields = [
-            'template_fields' => array_values(array_filter($all, fn($f) => ($f['scope'] ?? '') === 'template')),
-            'variant_fields'  => array_values(array_filter($all, fn($f) => ($f['scope'] ?? '') === 'variant')),
-            'fields'          => array_values(array_filter($all, fn($f) => !in_array($f['scope'] ?? '', ['template', 'variant'], true))),
-        ];
 
         $data = array_merge(['fetched_at' => now()->toISOString()], $entityFields);
 
@@ -216,7 +200,7 @@ class ProductFieldConfigController extends Controller
 
     public function fetchErpFields(Request $request)
     {
-        $entityType = $request->query('entity', 'product');
+        $entityType = $this->resolveEntityTypeFromRequest($request);
         $erpDriver  = $this->settings->erpDriver();
         $fields     = [];
 
@@ -283,6 +267,123 @@ class ProductFieldConfigController extends Controller
         if (!Storage::disk(self::FIELDS_DISK)->exists($path)) return null;
         $data = json_decode(Storage::disk(self::FIELDS_DISK)->get($path), true);
         return $data['fetched_at'] ?? null;
+    }
+
+    private function resolveEntityTypeFromRequest(Request $request): string
+    {
+        return (string) ($request->input('entity') ?? $request->query('entity', 'product'));
+    }
+
+    /** @return array<string, mixed> */
+    private function validateFieldConfigRequest(Request $request): array
+    {
+        $fieldType = $request->input('field_type');
+        $direction = $request->input('direction');
+
+        $data = $request->validate([
+            'entity_type'         => 'nullable|string|max:50',
+            'direction'           => 'nullable|in:erp_to_ecom,ecom_to_erp',
+            'ecom_field'          => [
+                Rule::requiredIf(fn () => !($fieldType === 'custom' && $direction === 'ecom_to_erp')),
+                'nullable',
+                'string',
+                'max:100',
+            ],
+            'ecom_field_label'    => 'nullable|string|max:255',
+            'ecom_field_2'        => 'nullable|string|max:100',
+            'ecom_field_2_label'  => 'nullable|string|max:255',
+            'ecom_api_path'       => 'nullable|string|max:255',
+            'ecom_cast'           => 'nullable|string|max:50',
+            'erp_field'           => [
+                Rule::requiredIf(fn () => !($fieldType === 'custom' && $direction === 'erp_to_ecom')),
+                'nullable',
+                'string',
+                'max:100',
+            ],
+            'erp_field_label'     => 'nullable|string|max:255',
+            'erp_field_2'         => 'nullable|string|max:100',
+            'erp_field_2_label'   => 'nullable|string|max:255',
+            'field_type'          => 'required|in:default,custom,combine',
+            'combine_separator'   => 'nullable|string|max:20',
+            'scope'               => 'required|string|max:50',
+            'default_value'       => ['nullable', 'string', 'max:500'],
+            'conditions'          => 'nullable|string|max:2000',
+            'transform'           => 'nullable|string|max:100',
+            'transform_param'     => 'nullable|string|max:200',
+            'min_length'          => 'nullable|integer|min:0',
+            'max_length'          => 'nullable|integer|min:0',
+            'is_active'           => 'boolean',
+            'sort_order'          => 'nullable|integer|min:0',
+        ]);
+
+        if ($fieldType === 'custom' && $direction === 'ecom_to_erp') {
+            $data['ecom_field'] = null;
+            $data['ecom_field_label'] = null;
+        }
+
+        if ($fieldType === 'custom' && $direction === 'erp_to_ecom') {
+            $data['erp_field'] = $data['erp_field'] ?: null;
+            $data['erp_field_label'] = $data['erp_field_label'] ?: null;
+        }
+
+        if ($fieldType === 'combine' && $direction === 'ecom_to_erp') {
+            $data['erp_field_2'] = null;
+            $data['erp_field_2_label'] = null;
+        }
+
+        if ($fieldType === 'combine' && $direction === 'erp_to_ecom') {
+            $data['ecom_field_2'] = null;
+            $data['ecom_field_2_label'] = null;
+        }
+
+        $baseTransform = trim($request->input('transform_base') ?? '');
+        $param         = trim($request->input('transform_param') ?? '');
+        $data['transform'] = FieldTransformRegistry::build($baseTransform, $param !== '' ? $param : null);
+        unset($data['transform_param']);
+
+        if ($fieldType === 'custom') {
+            $data['default_value'] = $this->normalizeCustomDefaultValue(
+                $data['default_value'] ?? null,
+                $data['transform'] ?? null,
+                $data['ecom_cast'] ?? null
+            );
+        }
+
+        return $data;
+    }
+
+    private function normalizeCustomDefaultValue(?string $default, ?string $transform, ?string $ecomCast): ?string
+    {
+        unset($ecomCast);
+
+        if (trim($transform ?? '') !== '') {
+            return null;
+        }
+
+        $default = trim((string) ($default ?? ''));
+
+        if ($default === '' || in_array(strtolower($default), ['empty', 'null', 'none'], true)) {
+            return null;
+        }
+
+        return $default;
+    }
+
+    private function normalizeSortOrder(mixed $value): int
+    {
+        return max(0, (int) $value);
+    }
+
+    private function ecomFieldsFetchHint(string $entityType): string
+    {
+        return match ($entityType) {
+            'product' => 'No fields discovered. For ERP→Shopify, check GraphQL access. For Shopify→ERP, sync or fetch products first, then retry.',
+            'sales_order' => 'No orders found in Shopify. Create a test order, then retry.',
+            'customer' => 'No customers found in Shopify. Create a customer, then retry.',
+            'dispatch' => 'No fulfillments found. Fulfill an order in Shopify, then retry.',
+            'inventory' => 'No variants with inventory found. Add products with stock, then retry.',
+            default => "No fields discovered for {$entityType} in {$this->settings->ecomDisplayName()}.",
+        };
     }
 
 }

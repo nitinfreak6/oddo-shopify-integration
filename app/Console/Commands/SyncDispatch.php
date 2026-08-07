@@ -5,24 +5,23 @@ namespace App\Console\Commands;
 use App\Services\Sync\ScheduledSyncRunner;
 use Illuminate\Console\Command;
 
-class SyncProducts extends Command
+class SyncDispatch extends Command
 {
-    protected $signature = 'sync:products
-                            {--dry-run : Print state without dispatching}
-                            {--force   : Ignored — kept for backward compatibility}';
+    protected $signature = 'sync:dispatch
+                            {--dry-run : Print without syncing}';
 
-    protected $description = 'Sync products (fetch + post) using dashboard UI logic and global settings.';
+    protected $description = 'Sync dispatch (fetch + post) using dashboard UI logic and global settings.';
 
     public function handle(ScheduledSyncRunner $runner): int
     {
         if ($this->option('dry-run')) {
-            $this->info('Dry run — would run product fetch + post per product_sync_mode.');
+            $this->info('Dry run — would run fetchDispatch + postDispatch per sales order direction.');
 
             return self::SUCCESS;
         }
 
-        $result = $runner->runProducts();
-        $this->outputResult('products', $result);
+        $result = $runner->runDispatch();
+        $this->outputResult('dispatch', $result);
 
         return ($result['level'] ?? '') === 'error' ? self::FAILURE : self::SUCCESS;
     }
