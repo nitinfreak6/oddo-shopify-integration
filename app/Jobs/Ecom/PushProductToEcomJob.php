@@ -68,7 +68,10 @@ class PushProductToEcomJob implements ShouldQueue
             return;
         }
 
-        // Create log entry before push
+        $related = array_filter([
+            'vendors' => $data['vendors'] ?? null,
+        ], fn ($v) => $v !== null && $v !== []);
+
         $log = SyncLog::create([
             'direction'   => SyncLog::DIRECTION_ERP_TO_ECOM,
             'entity_type' => 'product',
@@ -78,19 +81,35 @@ class PushProductToEcomJob implements ShouldQueue
         ]);
 
         try {
-            $ecomProductId = $ecom->syncProduct($template, $variants, $attributeValues);
+            $ecomProductId = $ecom->syncProduct($template, $variants, $attributeValues, $related);
 
             $cache->markEcomSent($this->erpId, $ecomProductId);
 			
 			$wire = method_exists($ecom, 'takeWireLog') ? $ecom->takeWireLog() : [];
 
-            // Store response so Info tab shows it
+            // request_payload = the outgoing request only (action/query/variables).
+            // response_payload = responses only. recordResponse() attaches the
+            // response onto each wire entry, so split the two cleanly here.
+            $requests = array_map(fn($w) => [
+                'action'    => $w['action'] ?? null,
+                'query'     => $w['query'] ?? null,
+                'variables' => $w['variables'] ?? null,
+            ], $wire);
+
+            $responses = array_map(fn($w) => [
+                'action'   => $w['action'] ?? null,
+                'response' => $w['response'] ?? null,
+            ], $wire);
+
             $log->update([
 				'status'           => SyncLog::STATUS_SUCCESS,
-				'request_payload'  => $wire ? json_encode($wire, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null,
-				'response_payload' => json_encode([
-					'id' => $ecomProductId, 'ecom_product_id' => $ecomProductId, 'driver' => $ecom->driverName(),
-				]),
+				'request_payload'  => $wire ? json_encode($requests, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null,
+				'response_payload' => json_encode(
+					$wire
+						? ['ecom_product_id' => $ecomProductId, 'driver' => $ecom->driverName(), 'mutations' => $responses]
+						: ['ecom_product_id' => $ecomProductId, 'driver' => $ecom->driverName()],
+					JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+				),
 				'synced_at' => now(),
 			]);
 
@@ -106,8 +125,23 @@ class PushProductToEcomJob implements ShouldQueue
             $log->markFailed($e->getMessage());
 
             if ($wire) {
+                $requests = array_map(fn($w) => [
+                    'action'    => $w['action'] ?? null,
+                    'query'     => $w['query'] ?? null,
+                    'variables' => $w['variables'] ?? null,
+                ], $wire);
+
+                $responses = array_map(fn($w) => [
+                    'action'   => $w['action'] ?? null,
+                    'response' => $w['response'] ?? null,
+                ], $wire);
+
                 $log->update([
-                    'request_payload' => json_encode($wire, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                    'request_payload'  => json_encode($requests, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                    'response_payload' => json_encode(
+                        ['driver' => $ecom->driverName(), 'error' => $e->getMessage(), 'mutations' => $responses],
+                        JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+                    ),
                 ]);
             }
 

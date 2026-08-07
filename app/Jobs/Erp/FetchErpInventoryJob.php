@@ -2,12 +2,15 @@
 
 namespace App\Jobs\Erp;
 
-use App\Jobs\Ecom\PushInventoryToEcomJob;
 use App\Jobs\Amazon\PushInventoryToAmazonJob;
+use App\Jobs\Ecom\PushInventoryToEcomJob;
 use App\Models\SyncMapping;
 use App\Models\SyncQueueState;
+use App\Services\ChannelMappingService;
 use App\Services\Erp\ErpInterface;
 use App\Services\SettingsService;
+use App\Services\Sync\InventorySyncService;
+use App\Services\Sync\SyncEntityState;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -28,9 +31,12 @@ class FetchErpInventoryJob implements ShouldQueue
         $this->onQueue('sync');
     }
 
-    public function handle(ErpInterface $erp, SettingsService $settings): void
-    {
-        // FIX #13: check enable flag
+    public function handle(
+        ErpInterface $erp,
+        SettingsService $settings,
+        InventorySyncService $inventorySync,
+        ChannelMappingService $channelMappings,
+    ): void {
         if (!$settings->isInventorySyncEnabled()) {
             Log::info('FetchErpInventoryJob: skipped — inventory sync is disabled in settings.');
             return;
@@ -60,21 +66,42 @@ class FetchErpInventoryJob implements ShouldQueue
         $state->markRunning();
 
         try {
-            // FIX: use getErpWriteDate() — reads last_erp_write_date
-            $writeDate = $state->getErpWriteDate();
+            if ($this->autoPush) {
+                $writeDate = $state->getErpWriteDate();
+                $locationId = $this->locationId
+                    ?? (($id = $channelMappings->defaultWarehouseOdooId()) !== null ? (int) $id : null);
 
-            Log::info("FetchErpInventoryJob: cursor={$writeDate} locationId=" . ($this->locationId ?? 'null'));
+                Log::info("FetchErpInventoryJob: cursor={$writeDate} locationId=" . ($locationId ?? 'null'));
 
-            $quants = $erp->getInventoryModifiedSince($writeDate, $this->locationId);
+                $quants = $erp->getInventoryModifiedSince($writeDate, $locationId);
+            } else {
+                Log::info('FetchErpInventoryJob: manual fetch — synced products at mapped warehouse');
 
-            Log::info("FetchErpInventoryJob: raw quants count=" . count($quants));
-            $latestWriteDate = $writeDate;
-            $stored  = 0;
-            $skipped = 0;
+                $quants = $inventorySync->collectQuantsForSyncedErpProducts();
+            }
+
+            Log::info('FetchErpInventoryJob: raw quants count=' . count($quants));
+
+            $latestWriteDate = $this->autoPush ? ($state->getErpWriteDate()) : '2000-01-01 00:00:00';
+            $stored          = 0;
+            $skipped         = 0;
+            $completionNotes = null;
+
+            if (!$this->autoPush && $quants === []) {
+                $hasSyncedProducts = SyncMapping::query()
+                    ->where('entity_type', 'product')
+                    ->where('erp_driver', $settings->erpDriver())
+                    ->whereNotNull('erp_id')
+                    ->whereNotNull('ecom_id')
+                    ->exists();
+
+                $completionNotes = $hasSyncedProducts
+                    ? 'nothing_changed'
+                    : 'error:no_synced_products';
+            }
 
             foreach ($quants as $quant) {
                 if ($this->autoPush) {
-                    // Scheduled/cron: dispatch push immediately
                     PushInventoryToEcomJob::dispatch($quant);
 
                     if ($settings->isAmazonChannelEnabled()) {
@@ -82,71 +109,67 @@ class FetchErpInventoryJob implements ShouldQueue
                     }
                     $stored++;
                 } else {
-                    // Manual Fetch Stock button: store as pending so Post Stock can push later.
-                    // Skip if write_date and quantity unchanged.
-                    $erpId        = (string) ($quant['product_id'][0] ?? $quant['id'] ?? '');
-                    $newWriteDate = $quant['write_date'] ?? null;
-                    $newQty       = $quant['quantity'] ?? $quant['qty'] ?? null;
+                    $erpId = (string) ($quant['product_id'][0] ?? $quant['product_id'] ?? '');
+                    if ($erpId === '' || $erpId === '0') {
+                        Log::warning('FetchErpInventoryJob: quant missing product_id', [
+                            'quant_id' => $quant['id'] ?? null,
+                        ]);
+                        continue;
+                    }
 
                     $existing = SyncMapping::where('entity_type', 'inventory')
                         ->where('erp_id', $erpId)
                         ->where('erp_driver', $settings->erpDriver())
                         ->first();
 
-                    if ($existing) {
-                        $prevMeta      = is_array($existing->metadata) ? $existing->metadata : json_decode($existing->metadata ?? '{}', true);
-                        $prevWriteDate = $prevMeta['write_date'] ?? null;
-                        $prevQty       = $prevMeta['quantity'] ?? $prevMeta['qty'] ?? null;
-
-                        if ($prevWriteDate !== null && $prevWriteDate === $newWriteDate && $prevQty == $newQty) {
-                            Log::debug("FetchErpInventoryJob: erp#{$erpId} unchanged, skipping.");
-                            $skipped++;
-                            if ($quant['write_date'] > $latestWriteDate) {
-                                $latestWriteDate = $quant['write_date'];
-                            }
-                            continue;
-                        }
-                    }
-
-                    SyncMapping::updateOrCreate(
+                    $changed = SyncEntityState::markFetched(
+                        'inventory',
                         [
-                            'entity_type' => 'inventory',
-                            'erp_id'      => $erpId,
-                            'erp_driver'  => $settings->erpDriver(),
+                            'erp_id'     => $erpId,
+                            'erp_driver' => $settings->erpDriver(),
                         ],
-                        [
-                            'ecom_status'         => 'pending',
-                            'metadata'            => $quant,
-                            'last_synced_at'      => now(),
-                            'last_sync_direction' => 'erp_to_ecom',
-                        ]
+                        $quant,
+                        $existing,
+                        'erp_to_ecom'
                     );
-                    $stored++;
+
+                    if ($changed) {
+                        $stored++;
+                    } else {
+                        $skipped++;
+                    }
                 }
 
-                if ($quant['write_date'] > $latestWriteDate) {
+                if (!empty($quant['write_date']) && $quant['write_date'] > $latestWriteDate) {
                     $latestWriteDate = $quant['write_date'];
                 }
             }
 
-            // Build notes for controller message BEFORE markComplete (which can clear notes)
-            $completionNotes = null;
-            if (!$this->autoPush) {
+            if (!$this->autoPush && $completionNotes === null) {
                 $completionNotes = $stored === 0 ? 'nothing_changed' : "fetched:{$stored}";
-                if ($skipped > 0) $completionNotes .= ":skipped:{$skipped}";
+                if ($skipped > 0) {
+                    $completionNotes .= ":skipped:{$skipped}";
+                }
             }
 
-            // Advance cursor by 1 second — query now uses strict > so this
-            // ensures the last-seen write_date is excluded on next run.
-            if ($latestWriteDate !== $writeDate) {
+            if ($this->autoPush && $latestWriteDate !== $state->getErpWriteDate()) {
                 $latestWriteDate = date('Y-m-d H:i:s', strtotime($latestWriteDate) + 1);
             }
 
-            $state->markComplete($latestWriteDate, $completionNotes);
+            if ($this->autoPush) {
+                $state->markComplete($latestWriteDate, $completionNotes);
+            } else {
+                $state->update([
+                    'is_running'     => false,
+                    'last_poll_at'   => now(),
+                    'run_started_at' => null,
+                    'notes'          => $completionNotes,
+                ]);
+            }
 
             Log::info("FetchErpInventoryJob [{$erp->driverName()}]: stored={$stored} skipped={$skipped}");
         } catch (\Throwable $e) {
-            $state->update(['is_running' => false, 'notes' => $e->getMessage()]);
+            $state->update(['is_running' => false, 'run_started_at' => null, 'notes' => $e->getMessage()]);
             throw $e;
         }
     }

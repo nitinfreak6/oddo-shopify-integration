@@ -2,12 +2,11 @@
 
 namespace App\Jobs\Ecom;
 
-use App\Models\ProductCache;
 use App\Models\SyncLog;
 use App\Models\SyncQueueState;
 use App\Services\Ecom\EcomInterface;
 use App\Services\SettingsService;
-use App\Services\Sync\ProductSyncService;
+use App\Services\Sync\EcomToErpProductState;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -38,7 +37,7 @@ class FetchEcomProductsJob implements ShouldQueue, ShouldBeUnique
         $this->onQueue('sync');
     }
 
-    public function handle(EcomInterface $ecom, ProductSyncService $syncService, SettingsService $settings): void
+    public function handle(EcomInterface $ecom, SettingsService $settings): void
     {
         if (!$settings->isProductSyncEnabled()) {
             Log::info('FetchEcomProductsJob: skipped — product sync disabled.');
@@ -86,19 +85,19 @@ class FetchEcomProductsJob implements ShouldQueue, ShouldBeUnique
 
             Log::info("FetchEcomProductsJob [{$driver}]: found {$total} products.");
 
-            $stored          = 0;
+            $changed         = 0;
+            $skipped         = 0;
             $latestUpdatedAt = null;
 
             foreach ($products as $ecomProduct) {
                 $ecomId    = (string) ($ecomProduct['id'] ?? '');
-                $updatedAt = $ecomProduct['updated_at'] ?? null;
+                $updatedAt = EcomToErpProductState::productUpdatedAt($ecomProduct);
                 if (!$ecomId) continue;
 
                 $existing = \App\Models\SyncMapping::where('entity_type', 'product')
                     ->where('ecom_id', $ecomId)
                     ->first();
 
-                // ── Save full product JSON to storage ──
                 $cacheData = [
                     'fetched_at'  => now()->toISOString(),
                     'ecom_id'     => $ecomId,
@@ -108,69 +107,38 @@ class FetchEcomProductsJob implements ShouldQueue, ShouldBeUnique
                 $filePath = 'ecom_products/' . $ecomId . '.json';
                 Storage::disk('local')->put($filePath, json_encode($cacheData, JSON_PRETTY_PRINT));
 
-                $alreadyInErp = $existing && $existing->erp_id && $existing->erp_id !== '0';
-
-                // ── Detect whether the ecom product actually changed ──
-                // Compare the freshly-fetched updated_at against what we stored
-                // the last time we pushed this product. A new product, or one
-                // whose updated_at moved forward, must be re-marked pending so
-                // the push step (ProductsController::postAll) picks it up again.
-                $prevUpdatedAt = $existing?->ecom_updated_at;
-                $isChanged = true;
-                if ($alreadyInErp && $prevUpdatedAt && $updatedAt) {
-                    $isChanged = \Carbon\Carbon::parse($updatedAt)->gt($prevUpdatedAt);
-                }
-                $needsPush = !$alreadyInErp || $isChanged;
-
-                // ── Update ProductCache ──
-                $cacheFields = [
-                    'name'         => $ecomProduct['title'] ?? $ecomProduct['name'] ?? null,
-                    'default_code' => $ecomProduct['variants'][0]['sku'] ?? null,
-                    'file_path'    => $filePath,
-                    'raw_data'     => $cacheData,
-                    'fetched_at'   => now(),
-                ];
-                if ($needsPush) {
-                    $cacheFields['ecom_status']    = ProductCache::STATUS_PENDING;
-                    $cacheFields['shopify_status'] = ProductCache::STATUS_PENDING;
-                }
-                ProductCache::updateOrCreate(['ecom_product_id' => $ecomId], $cacheFields);
-
-                // ── Update SyncMapping — always refresh metadata + updated_at ──
-                $mappingFields = [
-                    'ecom_handle'         => $ecomProduct['handle'] ?? null,
-                    'last_sync_direction' => 'ecom_to_erp',
-                    'metadata'            => $ecomProduct,
-                    'last_synced_at'      => now(),
-                    'ecom_updated_at'     => $updatedAt,
-                ];
-                if ($needsPush) {
-                    $mappingFields['ecom_status'] = 'pending';
-                }
-                \App\Models\SyncMapping::updateOrCreate(
-                    ['entity_type' => 'product', 'ecom_id' => $ecomId, 'ecom_driver' => $driver],
-                    $mappingFields
+                $wasChanged = EcomToErpProductState::markFetched(
+                    $ecomId,
+                    $ecomProduct,
+                    $existing,
+                    $filePath,
+                    $cacheData,
+                    $driver
                 );
 
-                // ── SyncLog ──
-                SyncLog::create([
-                    'direction'       => SyncLog::DIRECTION_ECOM_TO_ERP,
-                    'entity_type'     => 'product',
-                    'entity_id'       => $ecomId,
-                    'action'          => 'fetch',
-                    'status'          => SyncLog::STATUS_SUCCESS,
-                    'request_payload' => json_encode($ecomProduct),
-                    'synced_at'       => now(),
-                ]);
+                if ($wasChanged) {
+                    SyncLog::create([
+                        'direction'       => SyncLog::DIRECTION_ECOM_TO_ERP,
+                        'entity_type'     => 'product',
+                        'entity_id'       => $ecomId,
+                        'action'          => 'fetch',
+                        'status'          => SyncLog::STATUS_SUCCESS,
+                        'request_payload' => json_encode($ecomProduct),
+                        'synced_at'       => now(),
+                    ]);
+                    $changed++;
+                } else {
+                    $skipped++;
+                }
 
                 if ($updatedAt && ($latestUpdatedAt === null || $updatedAt > $latestUpdatedAt)) {
                     $latestUpdatedAt = $updatedAt;
                 }
-
-                $stored++;
             }
 
-            $notes = $stored === 0 ? 'nothing_changed' : "fetched:{$stored}";
+            $notes = $changed === 0
+                ? 'nothing_changed'
+                : "fetched:{$changed}" . ($skipped > 0 ? ":skipped:{$skipped}" : '');
 
             $stateFields = [
                 'is_running'     => false,
@@ -183,7 +151,7 @@ class FetchEcomProductsJob implements ShouldQueue, ShouldBeUnique
             }
             $state->update($stateFields);
 
-            Log::info("FetchEcomProductsJob [{$driver}]: stored={$stored}");
+            Log::info("FetchEcomProductsJob [{$driver}]: changed={$changed}, skipped={$skipped}");
 
         } catch (\Throwable $e) {
             $state->update(['is_running' => false, 'notes' => $e->getMessage()]);
