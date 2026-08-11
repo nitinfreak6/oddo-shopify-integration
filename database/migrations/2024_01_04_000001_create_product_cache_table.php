@@ -10,7 +10,7 @@ return new class extends Migration
     {
         Schema::create('product_cache', function (Blueprint $table) {
             $table->id();
-            $table->unsignedInteger('odoo_id')->unique();
+            $table->unsignedInteger('odoo_id')->nullable();
             $table->string('name', 255);
             $table->string('default_code', 100)->nullable();   // SKU / internal ref
             $table->string('file_path', 500);                  // relative path to JSON file
