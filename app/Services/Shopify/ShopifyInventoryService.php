@@ -3,12 +3,21 @@
 namespace App\Services\Shopify;
 
 use App\Exceptions\ShopifyApiException;
+use App\Models\ProductFieldConfig;
+use App\Services\Config\NestedFieldResolver;
+use App\Services\FieldMappingService;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class ShopifyInventoryService
 {
+    private array $wireLog = [];
+
     public function __construct(
         private readonly ShopifyGraphQLService $graphql,
+        private readonly FieldMappingService $fieldMapping,
+        private readonly NestedFieldResolver $fields,
     ) {}
 
     // ── GID helpers ──────────────────────────────────────────────────────
@@ -27,14 +36,30 @@ class ShopifyInventoryService
     // ── Public API ───────────────────────────────────────────────────────
 
     /**
-     * Set inventory level for a specific item at a location.
-     * Uses inventorySetQuantities mutation (supported from 2023-10+).
+     * Set inventory level from a field-config mapped payload.
+     * Payload keys/paths come from ecom_field — same as product field configs.
+     *
+     * @param  array<string, mixed>  $mappedPayload  Nested payload from buildErpToEcomInventoryPayload()
+     * @param  array<string, mixed>  $wireContext    Runtime values keyed by ecom_field
      */
-    public function setLevel(string $inventoryItemId, string $shopifyLocationId, int $available): array
+    public function setLevel(array $mappedPayload, array $wireContext = []): array
     {
+        $configs = $this->fieldMapping->getInventoryErpToEcomConfigs();
+
+        if ($configs->isEmpty()) {
+            throw new \RuntimeException(
+                'Shopify inventory push aborted: no active erp→ecom inventory field configs.'
+            );
+        }
+
+        $payload   = $this->enrichPayloadWithWireContext($mappedPayload, $configs, $wireContext);
+        $variables = $this->buildGraphQLVariablesFromPayload($payload, $configs);
+
+        $this->activateInventoryAtLocationIfNeeded($variables['input'] ?? []);
+
         $mutation = <<<'GQL'
-        mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
+        mutation inventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+            inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
                 inventoryAdjustmentGroup {
                     createdAt
                     reason
@@ -51,18 +76,12 @@ class ShopifyInventoryService
         }
         GQL;
 
-        $data   = $this->graphql->query($mutation, [
-            'input' => [
-                'name'                 => 'available',
-                'reason'               => 'correction',
-                'ignoreCompareQuantity' => true,
-                'quantities' => [[
-                    'inventoryItemId' => $this->toGid('InventoryItem', $inventoryItemId),
-                    'locationId'      => $this->toGid('Location', $shopifyLocationId),
-                    'quantity'        => $available,
-                ]],
-            ],
-        ]);
+        $data = $this->gql(
+            'inventorySetQuantities',
+            $mutation,
+            $variables,
+            $this->displayPayload($variables['input'] ?? $payload)
+        );
 
         $errors = $this->graphql->extractUserErrors($data, 'inventorySetQuantities');
 
@@ -74,83 +93,491 @@ class ShopifyInventoryService
             );
         }
 
-        Log::info("Shopify inventory set via GraphQL: item={$inventoryItemId} location={$shopifyLocationId} qty={$available}");
+        Log::info('Shopify inventory set via GraphQL', ['wire_input' => $this->displayPayload($payload)]);
 
         return $data['inventorySetQuantities']['inventoryAdjustmentGroup'] ?? [];
     }
 
     /**
-     * Set inventory for multiple items at once (batch).
+     * Batch inventory updates are not supported — use setLevel() per item with field-config payloads.
+     *
+     * @deprecated Use setLevel() with mapped payloads built from inventory field configs.
      */
     public function setLevelBatch(array $quantities, string $shopifyLocationId): array
     {
-        $mutation = <<<'GQL'
-        mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
-                inventoryAdjustmentGroup {
-                    createdAt
-                    changes { name delta quantityAfterChange }
+        throw new \RuntimeException(
+            'Shopify batch inventory push is not supported. '
+            . 'Push each item with setLevel() using inventory field-config mapped payloads.'
+        );
+    }
+
+    /**
+     * Update inventory for a product (by product GID or numeric ID).
+     * Called by ShopifyEcomAdapter::updateInventory() — payload comes from field configs only.
+     */
+    public function update(string|int $productGidOrId, int $quantity, ?string $locationId = null, ?array $mappedPayload = null): void
+    {
+        unset($quantity, $locationId);
+
+        if (!is_array($mappedPayload) || $mappedPayload === []) {
+            throw new \RuntimeException(
+                'Shopify inventory push aborted: mapped payload is required (build from inventory field configs).'
+            );
+        }
+
+        $configs = $this->fieldMapping->getInventoryErpToEcomConfigs();
+        if ($configs->isEmpty()) {
+            throw new \RuntimeException(
+                'Shopify inventory push aborted: no active erp→ecom inventory field configs.'
+            );
+        }
+
+        $inventoryItemIds = $this->resolveInventoryItemIds($productGidOrId);
+
+        if ($inventoryItemIds === []) {
+            throw new \RuntimeException(
+                "Shopify inventory push aborted: no tracked inventory items for product {$productGidOrId}."
+            );
+        }
+
+        foreach ($inventoryItemIds as $inventoryItemId) {
+            $itemPayload = $mappedPayload;
+            $this->injectInventoryItemId($itemPayload, $configs, (string) $inventoryItemId);
+            $this->setLevel($itemPayload);
+        }
+    }
+
+    /**
+     * Resolve tracked inventory item numeric IDs for a Shopify product.
+     *
+     * @return list<string>
+     */
+    public function resolveInventoryItemIdsForProduct(string|int $productGidOrId): array
+    {
+        return $this->resolveInventoryItemIds($productGidOrId);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     */
+    private function injectInventoryItemId(array &$payload, Collection $configs, string $inventoryItemId): void
+    {
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            if ($writePath === '' || !str_contains($writePath, 'inventoryItemId')) {
+                continue;
+            }
+
+            $current = $this->fields->get($payload, $writePath);
+            if ($current === null || $current === '') {
+                $this->fields->set($payload, $writePath, $inventoryItemId);
+            }
+        }
+    }
+
+    /**
+     * Apply ecom_cast and validate nested payload — GraphQL input matches field-config paths.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     * @return array<string, mixed>
+     */
+    private function buildGraphQLVariablesFromPayload(
+        array $payload,
+        Collection $configs
+    ): array {
+        $input = $payload;
+
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            if ($writePath === '') {
+                continue;
+            }
+
+            if (!$this->configValuePresent($input, $config, $writePath)) {
+                continue;
+            }
+
+            $value = $this->fields->get($input, $writePath);
+            $value = $this->applyAutomaticWireCast($value, $writePath);
+            $this->fields->set($input, $writePath, $value);
+        }
+
+        $input = $this->normalizeQuantitiesListShape($input);
+        $input = $this->ensureChangeFromQuantityPresent($input, $configs);
+        $this->ensureInventoryItemIdBeforeAssert($input, $configs);
+        $this->assertInventoryGraphQLInput($input, $configs);
+
+        return [
+            'idempotencyKey' => (string) Str::uuid(),
+            'input'          => $input,
+        ];
+    }
+
+    /**
+     * Shopify 2026-04: changeFromQuantity key is mandatory on every quantity row (null = skip CAS check).
+     *
+     * @param  array<string, mixed>  $input
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     * @return array<string, mixed>
+     */
+    private function ensureChangeFromQuantityPresent(array $input, Collection $configs): array
+    {
+        $quantities = $input['quantities'] ?? null;
+        if (!is_array($quantities)) {
+            return $input;
+        }
+
+        $configuredValue = $this->resolveChangeFromQuantityFromConfigs($configs);
+
+        foreach ($quantities as $index => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            if (!array_key_exists('changeFromQuantity', $row)) {
+                $row['changeFromQuantity'] = $configuredValue;
+                $input['quantities'][$index] = $row;
+            }
+        }
+
+        return $input;
+    }
+
+    /**
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     */
+    private function resolveChangeFromQuantityFromConfigs(Collection $configs): ?int
+    {
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $path = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            if ($path === '' || !str_contains($path, 'changeFromQuantity')) {
+                continue;
+            }
+
+            if ($config->field_type === 'custom') {
+                $default = trim((string) ($config->default_value ?? ''));
+                if ($default === '' || in_array(strtolower($default), ['empty', 'null', 'none'], true)) {
+                    return null;
                 }
-                userErrors { field message code }
+
+                return is_numeric($default) ? (int) $default : null;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     */
+    private function assertInventoryGraphQLInput(array $payload, Collection $configs): void
+    {
+        $missing = [];
+
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            if ($writePath === '') {
+                continue;
+            }
+
+            if ($this->configValueIsOptional($config)) {
+                continue;
+            }
+
+            $current = $this->fields->get($payload, $writePath);
+            if ($this->graphQLWireValuePresent($current, $config)) {
+                continue;
+            }
+
+            $label     = trim($config->ecom_field ?? '') ?: $writePath;
+            $missing[] = "{$label} ({$writePath})";
+        }
+
+        if ($missing === []) {
+            return;
+        }
+
+        throw new \RuntimeException(
+            'Shopify inventory push aborted: payload incomplete — missing '
+            . implode(', ', $missing)
+            . '. Check inventory field configs (ecom_field paths). '
+            . 'Payload: '
+            . json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT)
+        );
+    }
+
+    private function configValuePresent(array $payload, ProductFieldConfig $config, string $writePath): bool
+    {
+        if ($this->configValueIsOptional($config)) {
+            return true;
+        }
+
+        $current = $this->fields->get($payload, $writePath);
+        if ($this->graphQLWireValuePresent($current, $config)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function configValueIsOptional(ProductFieldConfig $config): bool
+    {
+        $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+        if (str_contains($writePath, 'inventoryItemId') || str_contains($writePath, 'changeFromQuantity')) {
+            return true;
+        }
+
+        if ($config->field_type !== 'custom') {
+            return false;
+        }
+
+        if (trim($config->transform ?? '') !== '') {
+            return false;
+        }
+
+        $default = trim((string) ($config->default_value ?? ''));
+
+        return $default === ''
+            || in_array(strtolower($default), ['empty', 'null', 'none'], true);
+    }
+
+    private function graphQLWireValuePresent(mixed $value, ProductFieldConfig $config): bool
+    {
+        if ($this->configValueIsOptional($config)) {
+            return true;
+        }
+
+        if ($value === null || $value === '') {
+            return false;
+        }
+
+        return !is_array($value);
+    }
+
+    /**
+     * Fail clearly if inventoryItemId config exists but value was not injected before GraphQL send.
+     *
+     * @param  array<string, mixed>  $input
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     */
+    private function ensureInventoryItemIdBeforeAssert(array $input, Collection $configs): void
+    {
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            if ($writePath === '' || !str_contains($writePath, 'inventoryItemId')) {
+                continue;
+            }
+
+            $current = $this->fields->get($input, $writePath);
+            if ($current !== null && $current !== '') {
+                continue;
+            }
+
+            throw new \RuntimeException(
+                'Shopify inventory push aborted: missing '
+                . $writePath
+                . '. Add a custom inventory field config with this ecom_field path (leave fixed value blank) — it is filled from the product at push time.'
+            );
+        }
+    }
+
+    /**
+     * Activate inventory at a location when not yet stocked (required for custom locations in admin UI).
+     *
+     * @param  array<string, mixed>  $input
+     */
+    private function activateInventoryAtLocationIfNeeded(array $input): void
+    {
+        $row = $input['quantities'][0] ?? null;
+        if (!is_array($row)) {
+            return;
+        }
+
+        $inventoryItemId = $row['inventoryItemId'] ?? null;
+        $locationId      = $row['locationId'] ?? null;
+        $quantity        = isset($row['quantity']) && is_numeric($row['quantity']) ? (int) $row['quantity'] : 0;
+
+        if ($inventoryItemId === null || $inventoryItemId === '' || $locationId === null || $locationId === '') {
+            return;
+        }
+
+        $itemGid = str_starts_with((string) $inventoryItemId, 'gid://')
+            ? (string) $inventoryItemId
+            : $this->toGid('InventoryItem', (string) $inventoryItemId);
+        $locGid = str_starts_with((string) $locationId, 'gid://')
+            ? (string) $locationId
+            : $this->toGid('Location', (string) $locationId);
+
+        if ($this->inventoryLevelExists($itemGid, $locGid)) {
+            return;
+        }
+
+        $mutation = <<<'GQL'
+        mutation inventoryActivate(
+            $inventoryItemId: ID!
+            $locationId: ID!
+            $available: Int!
+            $idempotencyKey: String!
+        ) {
+            inventoryActivate(
+                inventoryItemId: $inventoryItemId
+                locationId: $locationId
+                available: $available
+            ) @idempotent(key: $idempotencyKey) {
+                inventoryLevel {
+                    id
+                    quantities(names: ["available"]) { name quantity }
+                }
+                userErrors { field message }
             }
         }
         GQL;
 
-        $quantityInputs = array_map(fn($q) => [
-            'inventoryItemId' => $this->toGid('InventoryItem', $q['inventory_item_id']),
-            'locationId'      => $this->toGid('Location', $shopifyLocationId),
-            'quantity'        => (int) $q['quantity'],
-        ], $quantities);
-
-        $data   = $this->graphql->query($mutation, [
-            'input' => [
-                'name'      => 'available',
-                'reason'    => 'correction',
-                'quantities' => $quantityInputs,
-            ],
+        $data = $this->gql('inventoryActivate', $mutation, [
+            'inventoryItemId' => $itemGid,
+            'locationId'      => $locGid,
+            'available'       => max(0, $quantity),
+            'idempotencyKey'  => (string) Str::uuid(),
         ]);
 
-        $errors = $this->graphql->extractUserErrors($data, 'inventorySetQuantities');
-
-        if (!empty($errors)) {
+        $errors = $this->graphql->extractUserErrors($data, 'inventoryActivate');
+        if ($errors !== []) {
             throw new ShopifyApiException(
-                'Shopify batch inventorySetQuantities errors: ' . implode('; ', $errors),
+                'Shopify inventoryActivate errors: ' . implode('; ', $errors),
                 422,
-                'inventorySetQuantities'
+                'inventoryActivate'
             );
         }
-
-        return $data['inventorySetQuantities']['inventoryAdjustmentGroup'] ?? [];
     }
 
-    
-    /**
-     * Update inventory for a product (by product GID or inventory item GID).
-     * Resolves inventory item ID and location automatically.
-     * Called by ShopifyEcomAdapter::updateInventory().
-     */
-    public function update(string|int $productGidOrId, int $quantity, ?string $locationId = null): void
+    private function inventoryLevelExists(string $inventoryItemGid, string $locationGid): bool
     {
-        // locationId should already be resolved by PushInventoryToEcomJob from the location mapping
-        // Fall back to settings or first active location if not provided
-        $resolvedLocationId = $locationId
-            ?? app(\App\Services\SettingsService::class)->get('shopify_location_id')
-            ?? $this->getFirstLocationId();
+        $query = <<<'GQL'
+        query inventoryLevelExists($id: ID!, $locationId: ID!) {
+            inventoryItem(id: $id) {
+                inventoryLevel(locationId: $locationId) {
+                    id
+                }
+            }
+        }
+        GQL;
 
-        if (!$resolvedLocationId) {
-            throw new \RuntimeException('ShopifyInventoryService: no location ID available. Add location mapping in Settings.');
+        try {
+            $data = $this->graphql->query($query, [
+                'id'         => $inventoryItemGid,
+                'locationId' => $locationGid,
+            ]);
+
+            return !empty($data['inventoryItem']['inventoryLevel']['id']);
+        } catch (\Throwable $e) {
+            Log::warning('Shopify inventoryLevelExists check failed: ' . $e->getMessage());
+
+            return false;
+        }
+    }
+
+    private function applyAutomaticWireCast(mixed $value, string $writePath): mixed
+    {
+        if (is_string($value) && in_array(strtolower(trim($value)), ['empty', 'null', 'none'], true)) {
+            $value = null;
         }
 
-        // Get inventory item IDs from the product's variants
-        $inventoryItemIds = $this->resolveInventoryItemIds($productGidOrId);
+        $leaf = (string) last(explode('.', $writePath));
 
-        if (empty($inventoryItemIds)) {
-            throw new \RuntimeException("ShopifyInventoryService: no tracked inventory items found for product {$productGidOrId}. Enable inventory tracking in field config.");
+        return match ($leaf) {
+            'inventoryItemId' => $value !== null && $value !== ''
+                ? $this->toGid('InventoryItem', (string) $value)
+                : $value,
+            'locationId' => $value !== null && $value !== ''
+                ? $this->toGid('Location', (string) $value)
+                : $value,
+            'quantity' => is_numeric($value) ? (int) $value : $value,
+            'changeFromQuantity' => $value,
+            default => $value,
+        };
+    }
+
+    /**
+     * Ensure quantities is a JSON list [{...}] for Shopify GraphQL.
+     *
+     * @param  array<string, mixed>  $input
+     * @return array<string, mixed>
+     */
+    private function normalizeQuantitiesListShape(array $input): array
+    {
+        $quantities = $input['quantities'] ?? null;
+        if (!is_array($quantities)) {
+            return $input;
         }
 
-        foreach ($inventoryItemIds as $inventoryItemId) {
-            $this->setLevel((string) $inventoryItemId, (string) $resolvedLocationId, $quantity);
+        if (!array_is_list($quantities)) {
+            ksort($quantities, SORT_NUMERIC);
+            $input['quantities'] = array_values($quantities);
         }
+
+        return $input;
+    }
+
+    /**
+     * Merge wire-context values into nested payload at each config's write path.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  Collection<int, ProductFieldConfig>  $configs
+     * @param  array<string, mixed>  $wireContext
+     * @return array<string, mixed>
+     */
+    private function enrichPayloadWithWireContext(array $payload, Collection $configs, array $wireContext): array
+    {
+        foreach ($configs as $config) {
+            if (!$config->is_active) {
+                continue;
+            }
+
+            $writePath = trim($config->ecom_field ?? $config->shopify_field ?? '');
+            $ecomField = trim($config->ecom_field ?? '');
+            if ($writePath === '' || $ecomField === '' || !array_key_exists($ecomField, $wireContext)) {
+                continue;
+            }
+
+            if ($this->fields->get($payload, $writePath) === null) {
+                $this->fields->set($payload, $writePath, $wireContext[$ecomField]);
+            }
+        }
+
+        return $payload;
+    }
+
+    /** @param array<string, mixed> $payload */
+    private function displayPayload(array $payload): array
+    {
+        return array_filter(
+            $payload,
+            fn ($key) => !str_starts_with((string) $key, '_'),
+            ARRAY_FILTER_USE_KEY
+        );
     }
 
     /**
@@ -179,7 +606,7 @@ class ShopifyInventoryService
         }
         GQL;
 
-        $data = $this->graphql->query($query, ['id' => $gid]);
+        $data = $this->gql('getProductInventory', $query, ['id' => $gid]);
         $ids  = [];
 
         foreach ($data['product']['variants']['edges'] ?? [] as $edge) {
@@ -203,7 +630,7 @@ class ShopifyInventoryService
 
     /**
      * Get inventory levels for a list of inventory item IDs at a location.
-     * Returns array of [inventory_item_id => available] pairs.
+     * Returns rows with _sync_entity_id and _ecom_graphql_raw for field-config-driven fetch storage.
      */
     public function getLevels(array $inventoryItemIds, string $shopifyLocationId): array
     {
@@ -236,7 +663,7 @@ class ShopifyInventoryService
         }
         GQL;
 
-        $data  = $this->graphql->query($query, ['ids' => $gids]);
+        $data  = $this->gql('getInventoryItems', $query, ['ids' => $gids]);
         $nodes = $data['nodes'] ?? [];
 
         $result = [];
@@ -246,6 +673,7 @@ class ShopifyInventoryService
 
             $itemId    = $this->fromGid($node['id']);
             $available = 0;
+            $matchedLevelRaw = null;
 
             foreach ($node['inventoryLevels']['edges'] ?? [] as $edge) {
                 $level = $edge['node'];
@@ -256,7 +684,8 @@ class ShopifyInventoryService
                 $targetLocationNumeric   = $this->fromGid($locationGid);
 
                 if ($returnedLocationNumeric === $targetLocationNumeric) {
-                    foreach ($level['quantities'] as $q) {
+                    $matchedLevelRaw = $level;
+                    foreach ($level['quantities'] ?? [] as $q) {
                         if ($q['name'] === 'available') {
                             $available = $q['quantity'];
                         }
@@ -264,10 +693,21 @@ class ShopifyInventoryService
                 }
             }
 
-            $result[] = [
-                'inventory_item_id' => $itemId,
-                'available'         => $available,
+            $row = [
+                '_sync_entity_id' => $itemId,
             ];
+
+            if ($matchedLevelRaw !== null) {
+                $row['_ecom_graphql_raw'] = [
+                    'inventoryItem' => [
+                        'id'  => $node['id'],
+                        'sku' => $node['sku'] ?? null,
+                    ],
+                    'inventoryLevel' => $matchedLevelRaw,
+                ];
+            }
+
+            $result[] = $row;
         }
 
         return $result;
@@ -296,7 +736,7 @@ class ShopifyInventoryService
         }
         GQL;
 
-        $data      = $this->graphql->query($query);
+        $data = $this->gql('getLocations', $query);
         $locations = [];
 
         foreach ($data['locations']['edges'] ?? [] as $edge) {
@@ -311,5 +751,47 @@ class ShopifyInventoryService
         }
 
         return $locations;
+    }
+
+    /** @return array<int, array<string, mixed>> */
+    public function takeWireLog(): array
+    {
+        $log           = $this->wireLog;
+        $this->wireLog = [];
+
+        return $log;
+    }
+
+    private function gql(string $action, string $query, array $variables = [], ?array $wireInput = null): array
+    {
+        $this->recordWire($action, $query, $variables, $wireInput);
+        $data = $this->graphql->query($query, $variables);
+        $this->recordResponse($data);
+
+        return $data;
+    }
+
+    private function recordWire(string $action, string $query, array $variables, ?array $wireInput = null): void
+    {
+        $entry = [
+            'action'    => $action,
+            'query'     => $query,
+            'variables' => $variables,
+            'endpoint'  => 'graphql.json',
+            'mutation'  => $action,
+        ];
+
+        if ($wireInput !== null) {
+            $entry['wire_input'] = $wireInput;
+        }
+
+        $this->wireLog[] = $entry;
+    }
+
+    private function recordResponse(mixed $response): void
+    {
+        if (!empty($this->wireLog)) {
+            $this->wireLog[count($this->wireLog) - 1]['response'] = $response;
+        }
     }
 }

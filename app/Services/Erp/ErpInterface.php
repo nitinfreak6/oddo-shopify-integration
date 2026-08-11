@@ -48,6 +48,11 @@ interface ErpInterface
     public function getVariantsForProducts(array $productIds): array;
 
     /**
+     * Resolve product.template ID from a product.product (variant) ID.
+     */
+    public function resolveTemplateIdForVariant(int|string $variantId): ?string;
+
+    /**
      * Return attribute values for a list of attribute-value IDs.
      */
     public function getAttributeValues(array $valueIds): array;
@@ -77,11 +82,30 @@ interface ErpInterface
     public function availableQty(array $quant): int;
 
     /**
+     * Update stock level in ERP from a config-mapped payload.
+     */
+    public function updateInventoryLevel(array $payload): void;
+
+    /**
+     * Resolve a storable product ID from SKU / reference code.
+     */
+    public function resolveProductIdByReference(string $reference): ?int;
+
+    /**
      * Get fulfilled/dispatched orders from ERP.
      * Returns stock.picking records in 'done' state linked to sale orders.
      * Used by Fetch Dispatch and Post Dispatch.
      */
     public function getFulfilledOrders(?string $sinceDate = null): array;
+
+    /**
+     * Apply e-commerce fulfillment to an Odoo sale order delivery (validate picking).
+     *
+     * @param  array<string, mixed>  $mappedPayload
+     * @param  array<string, mixed>  $sourceFulfillment
+     * @return array{picking_id: int, wire: list<array<string, mixed>>}
+     */
+    public function applyFulfillmentToSaleOrder(int $saleOrderId, array $mappedPayload, array $sourceFulfillment): array;
 
     // ── Orders ───────────────────────────────────────────────────────────
 
@@ -123,7 +147,12 @@ interface ErpInterface
      * Create an order in the ERP from a normalized order array.
      * Returns the new ERP order ID.
      */
-    public function createOrder(array $orderData): int;
+    public function createOrder(array $orderData, array $sourceOrder = []): int;
+
+    /**
+     * Update an existing order in the ERP from a mapped payload.
+     */
+    public function updateOrder(int $orderId, array $orderData, array $sourceOrder = []): bool;
 
     /**
      * Confirm / approve an order in the ERP.
@@ -135,12 +164,37 @@ interface ErpInterface
      */
     public function cancelOrder(int $orderId): bool;
 
+    /**
+     * Permanently remove an order from the ERP when allowed (draft/cancelled).
+     */
+    public function deleteOrder(int $orderId): bool;
+
+    /**
+     * Remove a delivery picking / dispatch record from the ERP.
+     */
+    public function deleteDispatch(int $pickingId): bool;
+
+    /**
+     * Remove a product template from the ERP.
+     */
+    public function deleteProduct(int $productId): bool;
+
+    /**
+     * Remove a customer/partner from the ERP.
+     */
+    public function deleteCustomer(int $customerId): bool;
+
     // ── Customers ────────────────────────────────────────────────────────
 
     /**
      * Return customers modified after $writeDate.
      */
     public function getCustomersModifiedSince(string $writeDate): array;
+
+    /**
+     * Read one customer/partner by ERP id — full record from the ERP (all model fields).
+     */
+    public function getCustomer(int $erpId): ?array;
 
     /**
      * Find a customer by email. Returns null if not found.
@@ -168,6 +222,44 @@ interface ErpInterface
      * Resolve a state / province ID from a country ID and state code.
      */
     public function resolveState(int $countryId, string $code): ?int;
+
+    /**
+     * Resolve res.country id from ISO2, numeric id, or country name (field-config transform).
+     */
+    public function resolveCountryReference(mixed $value): ?int;
+
+    /**
+     * Resolve res.country.state id from code/name; $countryReference is ISO2, name, or Odoo country id.
+     */
+    public function resolveStateReference(mixed $stateValue, mixed $countryReference = null): ?int;
+
+    /**
+     * ERP country relation → ISO-2 code for ecom (field-config transform).
+     */
+    public function resolveCountryCode(mixed $countryReference): ?string;
+
+    /**
+     * ERP state relation → province/state code for ecom (field-config transform).
+     */
+    public function resolveStateCode(mixed $stateReference, mixed $countryReference = null): ?string;
+
+    /**
+     * Normalize one product write value for the active ERP (many2one IDs, etc.).
+     * Driver-specific — FieldMappingService calls this instead of Odoo-only helpers.
+     */
+    public function prepareProductWriteValue(string $field, mixed $value): mixed;
+
+    /**
+     * Extract a relation/foreign-key ID from mixed ecom or channel-map values.
+     */
+    public function extractRelationId(mixed $value): int|string|null;
+
+    /**
+     * Resolve a partner reference (supplier, customer, …) from a label or external value.
+     *
+     * @param  string  $role  e.g. supplier, customer
+     */
+    public function resolvePartnerReference(string $role, mixed $value): int|string|null;
 
     // ── Normalisation ────────────────────────────────────────────────────
 

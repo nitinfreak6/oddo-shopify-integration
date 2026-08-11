@@ -37,13 +37,31 @@ class OrderSyncService
     /**
      * Sync ERP order/sales_order to ecommerce
      */
+    /**
+     * Load a full ERP order with enriched order lines ready for field mapping.
+     */
+    public function prepareErpOrderForSync(int|string $erpId, ?array $fallback = null): array
+    {
+        $order = (is_array($fallback) && $fallback !== []) ? $fallback : [];
+
+        if ((string) $erpId !== '') {
+            $fresh = $this->erp->getOrder((int) $erpId);
+            if (is_array($fresh) && $fresh !== []) {
+                $order = $fresh;
+            }
+        }
+
+        return $this->enrichErpOrderLines($order);
+    }
+
     public function syncErpOrderToEcom(array $erpOrder): string
     {
         if ($this->isEcomToErp()) {
             throw new \LogicException('syncErpOrderToEcom() is for ERP → Ecom direction.');
         }
 
-        $erpId = (string) $erpOrder['id'];
+        $erpId    = (string) ($erpOrder['id'] ?? '');
+        $erpOrder = $this->prepareErpOrderForSync($erpId, $erpOrder);
 
         try {
             $result = $this->universalSync->syncFromErpToEcom(
@@ -61,6 +79,36 @@ class OrderSyncService
             ]);
             throw $e;
         }
+    }
+
+    /**
+     * Odoo list views often store order_line as IDs only — fetch full line records before mapping.
+     */
+    private function enrichErpOrderLines(array $erpOrder): array
+    {
+        $lines = $erpOrder['order_line'] ?? [];
+
+        if ($lines === [] || !is_array($lines)) {
+            return $erpOrder;
+        }
+
+        $first = reset($lines);
+        if (is_array($first)) {
+            return $erpOrder;
+        }
+
+        $lineIds = array_values(array_filter(
+            $lines,
+            fn ($v) => is_int($v) || (is_string($v) && ctype_digit($v))
+        ));
+
+        if ($lineIds === []) {
+            return $erpOrder;
+        }
+
+        $erpOrder['order_line'] = $this->erp->getOrderLines($lineIds);
+
+        return $erpOrder;
     }
 
     /**
@@ -132,7 +180,7 @@ class OrderSyncService
             ->where('ecom_driver', $ecomDriver)
             ->where('erp_driver', $erpDriver)
             ->where('is_active', true)
-            ->orderBy('sort_order')
+            ->ordered()
             ->get();
     }
 }

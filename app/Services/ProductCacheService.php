@@ -97,9 +97,6 @@ class ProductCacheService
 		$vendors = method_exists($this->erp, 'getVendorsForTemplate')
 			? $this->erp->getVendorsForTemplate($erpId)
 			: [];
-			
-		$template['_primary_vendor'] = $vendors[0]['partner_id'][1] ?? null;  // ← this line
-
 
         $data = [
             'fetched_at'       => now()->toISOString(),
@@ -107,7 +104,7 @@ class ProductCacheService
             'odoo_id'          => $erpId,
             'template'         => $template,
             'variants'         => $variants,
-			'vendors' => $vendors,
+            'vendors'          => $vendors,
             'attribute_values' => $attributeValues,
         ];
 
@@ -121,15 +118,8 @@ class ProductCacheService
 
         $erpIdCol = ProductCache::hasEcomColumns() ? 'erp_id' : 'odoo_id';
 
-        // When re-fetching a product that was already pushed (sent/skipped), reset its
-        // ecom status back to 'pending' so the Push button picks it up for re-push.
-        // New products (no existing row) have null status and are already picked up.
-        $existing    = ProductCache::where($erpIdCol, $erpId)->first();
-        $resetStatus = $existing && in_array(
-            $existing->ecom_status,
-            [ProductCache::STATUS_SENT, ProductCache::STATUS_SKIPPED],
-            true
-        );
+        // Set fetch status: first fetch → pending, any re-fetch with changes → updated.
+        $existing = ProductCache::where($erpIdCol, $erpId)->first();
 
         $updatePayload = [
             'odoo_id'       => $erpId,
@@ -149,12 +139,13 @@ class ProductCacheService
             'fetched_at'    => now(),
         ];
 
-        if ($resetStatus) {
-            $updatePayload['ecom_status']     = ProductCache::STATUS_PENDING;
-            $updatePayload['shopify_status']  = ProductCache::STATUS_PENDING;
-            $updatePayload['ecom_message']    = null;
-            $updatePayload['shopify_message'] = null;
-            Log::info("ProductCacheService: #{$erpId} was '{$existing->ecom_status}' — reset to pending for re-push.");
+        $updatePayload['ecom_status']     = $existing ? ProductCache::STATUS_UPDATED : ProductCache::STATUS_PENDING;
+        $updatePayload['shopify_status']  = $updatePayload['ecom_status'];
+        $updatePayload['ecom_message']    = null;
+        $updatePayload['shopify_message'] = null;
+
+        if ($existing) {
+            Log::info("ProductCacheService: #{$erpId} re-fetched — marked updated.");
         }
 
         $cache = ProductCache::updateOrCreate([$erpIdCol => $erpId], $updatePayload);
@@ -202,6 +193,7 @@ class ProductCacheService
             'ecom_synced_at'     => now(),
             'shopify_status'     => ProductCache::STATUS_SENT,
             'shopify_product_id' => $ecomProductId,
+            'shopify_message'    => null,
             'shopify_synced_at'  => now(),
         ]);
     }
@@ -209,11 +201,13 @@ class ProductCacheService
     public function markEcomFailed(int $erpId, string $message): void
     {
         $col = ProductCache::erpIdColumn();
+        $truncated = strlen($message) > 2000 ? substr($message, 0, 2000) . '…' : $message;
+
         ProductCache::where($col, $erpId)->update([
-            'ecom_status'    => ProductCache::STATUS_FAILED,
-            'ecom_message'   => $message,
-            'shopify_status' => ProductCache::STATUS_FAILED,
-            'shopify_message'=> $message,
+            'ecom_status'     => ProductCache::STATUS_PENDING,
+            'ecom_message'    => $truncated,
+            'shopify_status'  => ProductCache::STATUS_PENDING,
+            'shopify_message' => $truncated,
         ]);
     }
 

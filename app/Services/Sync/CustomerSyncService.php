@@ -35,11 +35,14 @@ class CustomerSyncService
     public function syncCustomerToEcom(array $erpCustomer): string
     {
         if (!$this->isEnabled()) {
-            Log::info("CustomerSyncService: customer sync disabled");
-            return '';
+            throw new \RuntimeException('Customer sync is disabled in Settings.');
         }
 
-        $erpId = (string) $erpCustomer['id'];
+        $erpId = (string) ($erpCustomer['id'] ?? '');
+
+        if ($erpId === '') {
+            throw new \RuntimeException('ERP customer payload is missing id.');
+        }
 
         try {
             $result = $this->universalSync->syncFromErpToEcom(
@@ -48,9 +51,17 @@ class CustomerSyncService
                 scope: null
             );
 
-            $ecomId = $result['id'] ?? $result['ecom_id'] ?? null;
+            $ecomId = (string) ($result['id'] ?? $result['ecom_id'] ?? '');
+
+            if ($ecomId === '') {
+                throw new \RuntimeException(
+                    'Push completed but no e-commerce customer ID was returned. Check erp→ecom field config and e-commerce API response.'
+                );
+            }
+
             Log::info("CustomerSyncService: synced ERP customer #{$erpId} → ecommerce #{$ecomId}");
-            return (string) $ecomId;
+
+            return $ecomId;
         } catch (\Throwable $e) {
             Log::error("CustomerSyncService: ERP→Ecom sync failed for #{$erpId}", [
                 'error' => $e->getMessage(),
@@ -172,7 +183,7 @@ class CustomerSyncService
             ->where('ecom_driver', $ecomDriver)
             ->where('erp_driver', $erpDriver)
             ->where('is_active', true)
-            ->orderBy('sort_order')
+            ->ordered()
             ->get();
     }
 }

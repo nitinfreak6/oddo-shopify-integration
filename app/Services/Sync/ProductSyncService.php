@@ -134,7 +134,7 @@ class ProductSyncService
             ->where('ecom_driver', $ecomDriver)
             ->where('erp_driver', $erpDriver)
             ->where('is_active', true)
-            ->orderBy('sort_order')
+            ->ordered()
             ->get();
     }
 }

@@ -201,6 +201,26 @@ class OdooProductService
         );
     }
 
+    public function resolveTemplateIdForVariant(int $variantId): ?int
+    {
+        if ($variantId <= 0) {
+            return null;
+        }
+
+        $rows = $this->odoo->read('product.product', [$variantId], ['product_tmpl_id']);
+        if ($rows === []) {
+            return null;
+        }
+
+        $raw = $rows[0]['product_tmpl_id'] ?? null;
+
+        if (is_array($raw)) {
+            return isset($raw[0]) ? (int) $raw[0] : null;
+        }
+
+        return $raw !== null && $raw !== '' ? (int) $raw : null;
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Attributes / options
     // ─────────────────────────────────────────────────────────────────────
