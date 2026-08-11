@@ -24,6 +24,7 @@
     $respArr      = ($wasPushed && $syncLog->response_payload)
                       ? (json_decode($syncLog->response_payload, true) ?? [])
                       : [];
+    $respErpId    = $respArr['erp_id'] ?? $respArr['id'] ?? null;
 
     // Product name — works for both directions
     $productName  = $data['template']['name']
@@ -123,7 +124,8 @@
     </div>
 
     {{-- ── 2-tab panel ── --}}
-    <div x-data="{ tab: 'source' }" class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+    @php $initialTab = ($syncLog && $syncLog->status === 'failed') ? 'target' : 'source'; @endphp
+    <div x-data="{ tab: '{{ $initialTab }}' }" class="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
 
         <div class="flex border-b border-gray-100 bg-gray-50">
             {{-- Tab 1: Source data --}}
@@ -175,15 +177,15 @@
                     <span class="text-indigo-600 font-medium">POST</span>
                     <code class="bg-white border border-indigo-100 px-2 py-0.5 rounded text-indigo-800 break-all">{{ $erpHost }}/web/dataset/call_kw</code>
                     <span class="text-indigo-300">·</span>
-                    <span class="text-indigo-600">model: <code class="bg-white border border-indigo-100 px-1 rounded">product.template</code></span>
+                    <span class="text-indigo-600">models: <code class="bg-white border border-indigo-100 px-1 rounded">product.template</code>,
+                    <code class="bg-white border border-indigo-100 px-1 rounded">product.product</code>,
+                    <code class="bg-white border border-indigo-100 px-1 rounded">product.supplierinfo</code></span>
                     <span class="text-indigo-300">·</span>
                     <span class="text-indigo-600">id: <code class="bg-white border border-indigo-100 px-1 rounded">{{ $erpId ?? $odooId }}</code></span>
                 </div>
             @endif
 
-            <p class="text-xs text-gray-400 mb-3">
-                Full JSON fetched from {{ $sourceLabel }}
-            </p>
+           
             <pre class="bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs text-gray-700 overflow-x-auto whitespace-pre-wrap"
                  style="max-height:72vh">{{ json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) }}</pre>
         </div>
@@ -273,8 +275,8 @@
                     {{-- Response header --}}
                     <div class="bg-gray-50 border-t border-b border-gray-200 px-4 py-2 flex items-center gap-2">
                         <span class="text-xs font-semibold text-gray-600">↓ {{ $targetLabel }} Response</span>
-                        @if($isEcomToErp && !empty($respArr['id']))
-                            <span class="text-xs text-gray-400">· {{ $erpDisplayName }} ID: <strong class="text-gray-700">{{ $respArr['id'] }}</strong></span>
+                        @if($isEcomToErp && !empty($respErpId))
+                            <span class="text-xs text-gray-400">· {{ $erpDisplayName }} ID: <strong class="text-gray-700">{{ $respErpId }}</strong></span>
                         @elseif(!$isEcomToErp && !empty($respArr['id']))
                             <span class="text-xs text-gray-400">· Product ID: <strong class="text-gray-700">{{ $respArr['id'] }}</strong></span>
                         @endif

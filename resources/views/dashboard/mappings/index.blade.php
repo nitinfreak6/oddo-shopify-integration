@@ -223,8 +223,8 @@ document.addEventListener('alpine:init', () => {
         erpLoading: false,
         ecomLoading: false,
         fieldsLoaded: false,
-        erpRoute:  '{{ route('dashboard.mappings.fetch-erp-fields', $type, false) }}',
-        ecomRoute: '{{ route('dashboard.mappings.fetch-ecom-fields', $type, false) }}',
+        erpRoute:  '{{ route('dashboard.mappings.fetch-erp-fields', $type) }}',
+        ecomRoute: '{{ route('dashboard.mappings.fetch-ecom-fields', $type) }}',
         csrfToken: '{{ csrf_token() }}',
         form: {
             channel: 'shopify',
